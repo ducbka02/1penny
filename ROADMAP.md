@@ -36,21 +36,17 @@ Tài liệu này định nghĩa lộ trình kỹ thuật nhằm giải quyết t
 
 ---
 
-### Phase 2 — Chuẩn hóa Engine Phái sinh & Backtest (`@1penny/analytics` + `@1penny/core/trading`)
+### Phase 2 — Chuẩn hóa Engine Phái sinh & Backtest (`@1penny/analytics` + `@1penny/core/trading`) *(Đã hoàn thành)*
 
-1. **Số học chính xác & Netting Position**:
-   - Bổ sung module tính toán khối lượng/phí/PnL tránh sai số cộng dồn `float64` qua hàng triệu nến.
-   - Chuyển `PaperExecutionAdapter` sang hỗ trợ cả 2 chế độ: `'hedging'` (mặc định cũ) và `'netting'` (chuẩn Perpetual Swap một chiều: gộp giá vốn bình quân khi bồi lệnh, chốt từng phần, đảo chiều vị thế trong 1 lệnh và gom nhóm `episodes` từ lúc mở tới lúc đóng hết vị thế).
-2. **Quản trị Rủi ro Cross / Isolated Margin Tiers**:
-   - Nhận cấu hình bậc thang ký quỹ (`tiers`: `minSz`, `maxSz`, `mmr`, `imr`, `maxLever`) và `ctVal` của hợp đồng.
-   - Áp công thức kiểm tra ký quỹ chặt chẽ khi rút/nạp Isolated Margin:
-     - Chỉ cho phép rút khi margin còn lại lớn hơn hoặc bằng `max(initial_margin, initial_margin - min(0, unrealized_pnl))`, tuyệt đối chặn trạng thái `margin <= 0` hoặc vượt trần đòn bẩy của tier.
-3. **Khớp lệnh Nội nến Worst-Case & Cờ `ambiguous`**:
-   - Trong `Backtester` và chế độ Replay theo bước nến, kiểm tra các đường đi giá đơn điệu hợp lệ trong cây nến (`Open → High → Low → Close` và `Open → Low → High → Close`).
-   - Khi cả Stop-Loss / Liquidation và Take-Profit cùng có thể kích hoạt trong cùng một cây nến M1 mà không có dữ liệu tick nhỏ hơn, ưu tiên kịch bản bảo thủ (worst-case) và đánh dấu `ambiguous: true` trên bản ghi khớp lệnh.
-4. **Funding Rate & Đồng bộ Nến Khởi tạo**:
-   - Hỗ trợ truyền chuỗi sự kiện `fundingRates` vào `Backtester` và `ReplayController`.
-   - Đồng bộ hóa bước khởi tạo chỉ báo tại cây nến `start` đầu tiên giữa chế độ chạy chiến lược tự động (Backtest) và chế độ tua từng bước (Strategy Replay) để kết quả khớp tuyệt đối 100%.
+- [x] **Số học chính xác & Netting Position**:
+  - Làm tròn chuẩn xác `1e-8` chống trôi dấu phẩy động; hỗ trợ cả `'hedging'` và `'netting'` trong `PaperExecutionAdapter` và `PerpetualExecutionEngine` (bình quân giá vốn, giảm vị thế, đảo chiều 1 lệnh, gom nhóm `episodes` flat-to-flat).
+- [x] **Quản trị Rủi ro Cross / Isolated Margin Tiers**:
+  - Hỗ trợ bậc thang ký quỹ (`minSz`, `maxSz`, `mmr`, `imr`, `maxLever`) và `ctVal`.
+  - Chặn chặt chẽ rút âm Isolated Margin hoặc rút dưới `max(initialMargin, initialMargin - min(0, unrealizedPnl))`.
+- [x] **Khớp lệnh Nội nến Worst-Case & Cờ `ambiguous`**:
+  - Duyệt cả hai đường đi giá đơn điệu `[O,H,L,C]` và `[O,L,H,C]`, chọn nhánh bảo thủ nhất và gắn `ambiguous: true` khi SL/Liquidation và TP xung đột trong cùng cây nến; bổ sung `stepBar(bar)` cho `PaperExecutionAdapter`.
+- [x] **Funding Rate, Đối soát Sổ cái & Đồng bộ Nến Khởi tạo**:
+  - Tính phí Funding theo mốc thời gian, ghi nhận `isolatedDeficitCredit`, kiểm chứng độc lập bằng `verifyPerpetualLedger`, và đảm bảo đồng nhất 100% giữa `runPerpetualBacktest` và `PerpetualReplaySession` ngay từ cây nến `bars[0]`.
 
 ---
 

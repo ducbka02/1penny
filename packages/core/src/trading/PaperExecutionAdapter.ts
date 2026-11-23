@@ -16,11 +16,18 @@ import type {
   PositionModifyIntent,
   PositionCloseIntent,
   PositionReverseIntent,
+  OHLCBar,
 } from '@1penny/commons';
+
+export type PaperPositionMode = 'hedging' | 'netting';
 
 export interface PaperExecutionOptions {
   /** Mark price used to fill market orders before `setMarkPrice` is called. */
   markPrice?: number;
+  /** `'hedging'` (default: one position per order) or `'netting'` (single one-way net position). */
+  mode?: PaperPositionMode;
+  /** Optional commission rate in basis points deducted from realized PnL (`5` = 0.05%). */
+  feeBps?: number;
 }
 
 /**
@@ -59,10 +66,14 @@ export class PaperExecutionAdapter implements ExecutionAdapter {
   private markPrice: number;
   /** The mark's time (ms), when the caller gives one (a replay). */
   private markTime: number | undefined;
+  private readonly mode: PaperPositionMode;
+  private readonly feeBps: number;
   private seq = 0;
 
   constructor(options: PaperExecutionOptions = {}) {
     this.markPrice = options.markPrice ?? 0;
+    this.mode = options.mode ?? 'hedging';
+    this.feeBps = options.feeBps ?? 0;
   }
 
   connect(_config: ExecutionConfig): void {
@@ -91,6 +102,25 @@ export class PaperExecutionAdapter implements ExecutionAdapter {
     this.markTime = time !== undefined && Number.isFinite(time) ? time : undefined;
     this.checkPendingOrders();
     this.checkStops();
+  }
+
+  /**
+   * Evaluate a full OHLC bar conservatively: routes through the adverse intrabar
+   * extreme first (low before high when net long, high before low when net short)
+   * so ambiguous same-bar SL/TP collisions always resolve worst-case.
+   */
+  stepBar(bar: OHLCBar): void {
+    const netDir = this.positions.reduce(
+      (acc, p) => acc + (p.side === 'buy' ? 1 : -1) * (p.quantity - (p.closedQuantity ?? 0)),
+      0,
+    );
+    const waypoints =
+      netDir >= 0
+        ? [bar.open, bar.low, bar.high, bar.close]
+        : [bar.open, bar.high, bar.low, bar.close];
+    for (const px of waypoints) {
+      this.setMarkPrice(px, bar.time);
+    }
   }
 
   /** When fills happen: the mark's time when one was given, else now. */
@@ -204,6 +234,10 @@ export class PaperExecutionAdapter implements ExecutionAdapter {
 
   private fill(order: TradingOrder, price: number): void {
     this.orders = this.orders.filter((o) => o.id !== order.id);
+    if (this.mode === 'netting' && this.positions.length > 0) {
+      this.fillNetting(order, price);
+      return;
+    }
     const position: TradingPosition = {
       id: this.nextId('pos'),
       side: order.side,
@@ -229,11 +263,91 @@ export class PaperExecutionAdapter implements ExecutionAdapter {
     this.emit('positions', this.positions);
   }
 
+  private fillNetting(order: TradingOrder, price: number): void {
+    const current = this.positions[0];
+    if (current.side === order.side) {
+      const totalQty = current.quantity + order.quantity;
+      const avgEntry =
+        (current.entryPrice * current.quantity + price * order.quantity) / totalQty;
+      const updated: TradingPosition = {
+        ...current,
+        quantity: totalQty,
+        entryPrice: avgEntry,
+        stopLoss: order.stopLoss ?? current.stopLoss,
+        takeProfit: order.takeProfit ?? current.takeProfit,
+        ...(order.trailingStop !== undefined ? { trailingStop: order.trailingStop } : {}),
+      };
+      this.positions = [updated];
+      this.emit('fill', {
+        orderId: order.id,
+        side: order.side,
+        price,
+        quantity: order.quantity,
+        time: this.fillTime(),
+        positionId: updated.id,
+        reason: 'order',
+      } satisfies FillEvent);
+      this.emit('orders', this.orders);
+      this.emit('positions', this.positions);
+      return;
+    }
+
+    // Opposite side: reduce, close, or flip
+    const closeQty = Math.min(current.quantity, order.quantity);
+    const flipQty = order.quantity - closeQty;
+    const dir = current.side === 'buy' ? 1 : -1;
+    const fee = closeQty * (current.entryPrice + price) * (this.feeBps / 10_000);
+    const realized = (price - current.entryPrice) * closeQty * dir - fee;
+
+    if (closeQty < current.quantity) {
+      this.positions = [{ ...current, quantity: current.quantity - closeQty }];
+    } else {
+      this.positions = [];
+    }
+
+    this.emit('fill', {
+      orderId: order.id,
+      side: order.side,
+      price,
+      quantity: closeQty,
+      time: this.fillTime(),
+      positionId: current.id,
+      reason: flipQty > 0 ? 'reverse' : 'close',
+      pnl: realized,
+    } satisfies FillEvent);
+
+    if (flipQty > 0) {
+      const flipped: TradingPosition = {
+        id: this.nextId('pos'),
+        side: order.side,
+        entryPrice: price,
+        quantity: flipQty,
+        stopLoss: order.stopLoss,
+        takeProfit: order.takeProfit,
+        ...(order.trailingStop !== undefined ? { trailingStop: order.trailingStop } : {}),
+      };
+      this.positions = [flipped];
+      this.emit('fill', {
+        orderId: order.id,
+        side: order.side,
+        price,
+        quantity: flipQty,
+        time: this.fillTime(),
+        positionId: flipped.id,
+        reason: 'order',
+      } satisfies FillEvent);
+    }
+
+    this.emit('orders', this.orders);
+    this.emit('positions', this.positions);
+  }
+
   /** Take a position off the book at `price`, reporting the fill and what it realised. */
   private close(position: TradingPosition, price: number, reason: FillReason): void {
     this.positions = this.positions.filter((p) => p.id !== position.id);
     const quantity = position.quantity - (position.closedQuantity ?? 0);
     const direction = position.side === 'buy' ? 1 : -1;
+    const fee = quantity * (position.entryPrice + price) * (this.feeBps / 10_000);
     this.emit('fill', {
       orderId: this.nextId('ord'),
       side: opposite(position.side),
@@ -242,7 +356,7 @@ export class PaperExecutionAdapter implements ExecutionAdapter {
       time: this.fillTime(),
       positionId: position.id,
       reason,
-      pnl: (price - position.entryPrice) * quantity * direction,
+      pnl: (price - position.entryPrice) * quantity * direction - fee,
     } satisfies FillEvent);
   }
 

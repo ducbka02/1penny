@@ -22,3 +22,29 @@ export {
 } from './slippage.js';
 export * from './types.js';
 export * from './strategies/index.js';
+export {
+  PerpetualExecutionEngine,
+  PerpetualReplaySession,
+  DEFAULT_MARGIN_TIERS,
+  marginRequirements,
+  verifyPerpetualLedger,
+  runPerpetualBacktest,
+} from './PerpetualEngine.js';
+export type {
+  MarginMode,
+  MarginTier,
+  MarginRequirements,
+  PerpetualOrderInput,
+  PerpetualPendingOrder,
+  PerpetualPosition,
+  PerpetualFillReason,
+  PerpetualFill,
+  FundingPayment,
+  MarginAdjustmentRecord,
+  PerpetualEpisode,
+  PerpetualEngineOptions,
+  PerpetualStrategyContext,
+  PerpetualStrategyFn,
+  LedgerVerification,
+  PerpetualRunResult,
+} from './PerpetualEngine.js';
