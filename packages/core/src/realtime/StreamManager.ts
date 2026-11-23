@@ -109,6 +109,8 @@ export class StreamManager extends Emitter<StreamEvents> {
   private sentPreviousClose: number | null = null;
   /** When the bar `previousClose` is the close of starts, ms: a correction of it moves the close. */
   private previousCloseTime: number | null = null;
+  /** Last forming bar seen on `barUpdate`, so minute rollover without an explicit `barClose` still advances `previousClose`. */
+  private lastFormingBar: OHLCBar | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private lastMessageTime = 0;
   /** Bumped by every connect attempt and by disconnect — see doConnect. */
@@ -147,10 +149,19 @@ export class StreamManager extends Emitter<StreamEvents> {
 
     // Wire aggregator events -> stream events
     this.aggregator.on('bar', (bar) => {
+      const barTime = normalizeBarTime(bar.time);
+      if (this.lastFormingBar && barTime > normalizeBarTime(this.lastFormingBar.time)) {
+        const prevTime = normalizeBarTime(this.lastFormingBar.time);
+        if (this.previousCloseTime === null || prevTime > this.previousCloseTime) {
+          this.setPreviousClose(this.lastFormingBar);
+        }
+      }
+      this.lastFormingBar = { ...bar };
       this.emit('barUpdate', bar);
       this.updatePrice(bar.close);
     });
     this.aggregator.on('barClose', (bar) => {
+      this.lastFormingBar = null;
       this.setPreviousClose(bar);
       this.emit('barClose', bar);
     });
@@ -189,6 +200,7 @@ export class StreamManager extends Emitter<StreamEvents> {
     this.previousClose = null;
     this.previousCloseTime = null;
     this.sentPreviousClose = null;
+    this.lastFormingBar = null;
 
     this.setState('disconnected');
   }
@@ -208,11 +220,13 @@ export class StreamManager extends Emitter<StreamEvents> {
     this.source.unsubscribe();
     this.reconnector.start();
     this.aggregator?.reset();
+    this.lastFormingBar = null;
     this.aggregator?.setTimeframe(timeframe);
     this.lastPrice = null;
     this.previousClose = null;
     this.previousCloseTime = null;
     this.sentPreviousClose = null;
+    this.lastFormingBar = null;
 
     // Another symbol or timeframe is a new series; the same again is merged with the bars loaded.
     if (symbol !== this.config.symbol || timeframe !== this.config.timeframe) this.source.resampler?.renewZone(symbol);

@@ -275,8 +275,42 @@ export { RANGE_PRESETS, rangePresetStart } from '@1penny/core';
 export type { RangePreset } from '@1penny/core';
 
 // Re-export features
-export { AlertManager, ReplayManager, ChartStateManager, UndoRedoManager, SignalMarkerManager, TradeZoneManager } from '@1penny/core';
-export type { PriceAlert, AlertCondition, AlertOptions, ReplayConfig, ChartSnapshot, UndoableAction } from '@1penny/core';
+export {
+  AlertManager,
+  ReplayManager,
+  ChartStateManager,
+  UndoRedoManager,
+  SignalMarkerManager,
+  TradeZoneManager,
+  KEEPALIVE_SAFE_BYTES,
+  DEFAULT_MAX_SHARD_BYTES,
+  DEFAULT_MAX_FREEHAND_ANCHORS,
+  utf8ByteLength,
+  measureShardPayload,
+  buildCloudSaveRequestInit,
+  capDrawingAnchors,
+  extractChartConfig,
+  parseChartConfigShard,
+  mergeChartConfig,
+  parseDrawingsShard,
+  diffDrawings,
+  applyDrawingsDelta,
+  threeWayMergeDrawings,
+} from '@1penny/core';
+export type {
+  PriceAlert,
+  AlertCondition,
+  AlertOptions,
+  ReplayConfig,
+  ChartSnapshot,
+  SnapshotIndicator,
+  ChartConfigShard,
+  DrawingsShard,
+  DrawingsDelta,
+  CloudSaveCheck,
+  BuildCloudSaveInitOptions,
+  UndoableAction,
+} from '@1penny/core';
 export { isPriceLevelAlert, MAX_ALERT_BARS, MIN_ALERT_BARS } from '@1penny/core';
 
 // Re-export animation

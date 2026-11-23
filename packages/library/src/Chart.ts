@@ -104,6 +104,11 @@ import {
   rangePresetStart,
   ReplayManager,
   ChartStateManager,
+  extractChartConfig,
+  parseChartConfigShard,
+  mergeChartConfig,
+  parseDrawingsShard,
+  capDrawingAnchors,
   UndoRedoManager,
   Animator,
   KeyboardHandler,
@@ -6017,6 +6022,10 @@ export class Chart {
   loadState(json: string): void {
     if (!this.features.saveLoad) return;
     const snapshot = ChartStateManager.deserialize(json);
+    this.applySnapshot(snapshot);
+  }
+
+  private applySnapshot(snapshot: import('@1penny/core').ChartSnapshot): void {
     // The saved type's settings (none saved: the defaults).
     this.chartTypeOptions = snapshot.chartTypeOptions ?? {};
     this.display.reset();
@@ -6051,6 +6060,73 @@ export class Chart {
       });
     }
     this.markStateChanged();
+  }
+
+  private drawingsRevision = 0;
+
+  /**
+   * Export lightweight, symbol-independent visual & indicator configuration
+   * (excluding drawings, working orders, and open positions — typically < 4 KB).
+   */
+  exportChartConfig(): import('@1penny/core').ChartConfigShard {
+    return extractChartConfig(this.captureSnapshot());
+  }
+
+  /**
+   * Import a `ChartConfigShard` (or its JSON string) while preserving existing
+   * price-pane drawings and drawing-linked alerts on the chart.
+   */
+  importChartConfig(config: import('@1penny/core').ChartConfigShard | string): void {
+    const parsed = parseChartConfigShard(config);
+    const merged = mergeChartConfig(this.captureSnapshot(), parsed);
+    this.applySnapshot(merged);
+  }
+
+  /**
+   * Export per-symbol drawings as a versioned `DrawingsShard`, optionally capping
+   * dense freehand stroke anchor counts so cloud autosave payloads stay compact.
+   */
+  exportDrawings(options?: {
+    symbol?: string;
+    revision?: number;
+    maxAnchorsPerDrawing?: number;
+  }): import('@1penny/core').DrawingsShard {
+    const rawDrawings = [
+      ...this.getDrawings().filter((d) => d.paneId === undefined || this.layoutManager.getPanels().some((panel) => panel.id === d.paneId)),
+      ...this.keptPaneDrawings,
+    ];
+    const drawings =
+      options?.maxAnchorsPerDrawing !== undefined
+        ? rawDrawings.map((d) => capDrawingAnchors(d, options.maxAnchorsPerDrawing))
+        : rawDrawings;
+    const symbol = options?.symbol ?? (this.currentSymbol || undefined);
+    return {
+      version: 1,
+      ...(symbol ? { symbol } : {}),
+      revision: options?.revision ?? this.drawingsRevision,
+      updatedAt: Date.now(),
+      drawings,
+    };
+  }
+
+  /**
+   * Import a `DrawingsShard` (or raw `DrawingState[]` / JSON string) onto the chart,
+   * validating each drawing and dropping any anchored to non-existent indicator panes.
+   */
+  importDrawings(
+    payload: import('@1penny/core').DrawingsShard | readonly DrawingState[] | string,
+    options?: { maxAnchorsPerDrawing?: number },
+  ): import('@1penny/core').DrawingsShard {
+    const shard = parseDrawingsShard(payload, {
+      symbol: this.currentSymbol || undefined,
+      maxAnchorsPerDrawing: options?.maxAnchorsPerDrawing,
+    });
+    const placed = shard.drawings.filter(
+      (d) => d.paneId === undefined || this.takesDrawing(d.paneId, d.type),
+    );
+    this.drawingsRevision = shard.revision;
+    this.setDrawings(placed);
+    return { ...shard, drawings: placed };
   }
 
   /** The layout saved under `localStorage[key]` (`saveState(key)`, `setAutoSave(key)`); false when there is none, and it throws on one that isn't JSON. */

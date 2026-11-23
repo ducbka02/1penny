@@ -157,8 +157,9 @@ describe('OkxAdapter', () => {
       data: [[String(t0 + 60_000), '102', '104', '102', '104', '2', '0.2', '20', '0']],
     });
 
-    // 12:00 was provisionally closed at 102 so previousClose moved to 12:00
-    expect(closedBars).toEqual([102]);
+    // 12:00 rolled over provisionally without fabricating a fake barClose, advancing previousClose to 102
+    expect(closedBars).toEqual([]);
+    expect(priceChanges.at(-1)).toEqual({ price: 104, previousClose: 102 });
 
     // 3. 30ms later, OKX delivers the true final confirm="1" for 12:00 with close = 103.5!
     ws.push({

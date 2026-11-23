@@ -206,8 +206,9 @@ export class TickAggregator extends Emitter<AggregatorEvents> {
     this.builtFromTrades = false;
     if (this.currentBar && normalizeBarTime(this.currentBar.time) < at) {
       // Next bar arrived before the venue's final frame for the previous bar:
-      // close the previous bar provisionally; a late closed frame still lands as `correction`.
-      this.emit('barClose', { ...this.currentBar, closed: true });
+      // drop the stale forming ref without fabricating a confirmed `barClose`
+      // (which would clobber host-side `updateBar` edits); any late `closed=true`
+      // frame from the venue still lands cleanly as `correction`.
       this.currentBar = null;
     }
     if (closed && this.currentBar && normalizeBarTime(this.currentBar.time) === at) {

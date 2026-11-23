@@ -61,13 +61,13 @@ Tài liệu này định nghĩa lộ trình kỹ thuật nhằm giải quyết t
 
 ---
 
-### Phase 4 — Chuẩn hóa Lưu trữ Layout / Drawings Phân mảnh & Đa Tab
+### Phase 4 — Chuẩn hóa Lưu trữ Layout / Drawings Phân mảnh & Đa Tab *(Đã hoàn thành)*
 
-1. **API Xuất/Nhập Trạng thái Tách lớp**:
-   - Bổ sung `chart.exportChartConfig()` / `chart.importChartConfig()` (chỉ gồm loại biểu đồ, theme, overrides, danh sách chỉ báo — dung lượng < 4 KB).
-   - Bổ sung `chart.exportDrawings({ symbol })` / `chart.importDrawings(payload)` kèm theo dõi thay đổi tăng dần (`revision` + danh sách `upserted` / `deleted` drawing IDs).
-2. **An toàn truyền tải Cloud Autosave**:
-   - Cung cấp tiện ích kiểm tra kích thước byte trước khi serialize, giới hạn số lượng điểm vẽ tối đa (ví dụ cho công cụ vẽ tay freehand `brush`/`highlighter`) để không làm phình payload, và hỗ trợ cơ chế tự động bỏ cờ `keepalive` khi payload lớn hơn 60 KB.
+- [x] **API Xuất/Nhập Trạng thái Tách lớp (`ShardedChartState` & `Chart`)**:
+  - Bổ sung `chart.exportChartConfig()` / `chart.importChartConfig()` (`ChartConfigShard` chỉ gồm loại biểu đồ, theme, overrides, danh sách chỉ báo & cảnh báo không gắn hình vẽ — dung lượng < 4 KB, giữ nguyên hình vẽ hiện có trên biểu đồ đích khi import).
+  - Bổ sung `chart.exportDrawings()` / `chart.importDrawings()` (`DrawingsShard` theo mã giao dịch & `revision`) cùng bộ tiện ích `diffDrawings`, `applyDrawingsDelta`, và `threeWayMergeDrawings` xử lý xung đột `ETag` (`HTTP 412`) đa tab không mất thao tác sửa.
+- [x] **An toàn truyền tải Cloud Autosave**:
+  - Bổ sung `utf8ByteLength`, `measureShardPayload`, `capDrawingAnchors` (giới hạn số điểm neo của nét vẽ tự do `brush`/`highlighter` bảo toàn điểm đầu-cuối) và `buildCloudSaveRequestInit` tự động tắt cờ `keepalive` khi payload vượt 60 KB (`KEEPALIVE_SAFE_BYTES`), tránh lỗi `Failed to fetch` ở giới hạn 64 KiB của trình duyệt.
 
 ---
 
