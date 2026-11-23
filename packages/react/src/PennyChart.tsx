@@ -9,6 +9,7 @@ import {
 } from '@1penny/chart';
 import type {
   ChartType,
+  ChartEventType,
   TimeFrame,
   ChartOptions,
   FeaturesConfig,
@@ -20,10 +21,24 @@ import type {
   TradeZoneStyle,
   DataAdapter,
   DataFeed,
-  StreamConfig,
   ChartStyleOverrides,
   IndicatorSpec,
   FedBars,
+  TradingOrder,
+  TradingPosition,
+  ExecutionAdapter,
+  ExecutionConfig,
+  DrawingToolType,
+  TimeZoneSetting,
+  OrderPlacePayload,
+  OrderModifyPayload,
+  OrderCancelPayload,
+  PositionModifyPayload,
+  PositionClosePayload,
+  FillEvent,
+  DrawingCreatePayload,
+  DrawingRemovePayload,
+  BarClickPayload,
 } from '@1penny/chart';
 
 export interface PennyChartRef {
@@ -33,13 +48,12 @@ export interface PennyChartRef {
 }
 
 /**
- * The chart is made once, on mount. Later changes to `symbol`, `timeframe`,
- * `theme`, `chartType`, `indicators`, `data`, `stream`, `features`,
- * `overrides`, the markers and zones and `onCrosshairMove` go to it
- * (`setTheme`, `setChartType`, `setData`…). `options` and `autoScale` are
- * read at mount; `adapter`, `feed`, `historyLimit` and `watermarkText` when the
- * stream connects (at mount, or for a new symbol or interval). Unmounting
- * closes the chart's stream and destroys it.
+ * Host-controlled React wrapper for `@1penny/chart` (`Chart`).
+ *
+ * Allows an external UI shell (e.g. HeroUI + Tabler toolbars/modals) to drive
+ * streaming, orders, positions, execution adapters, active drawing tools,
+ * magnet snapping, time zone, and chart events declaratively without mounting
+ * `ChartWidget`'s built-in DOM chrome.
  */
 export interface PennyChartProps {
   /** The stream's symbol (`'BTCUSDT'`); a new one reconnects the stream, while there is no `data`. */
@@ -48,35 +62,18 @@ export interface PennyChartProps {
   timeframe?: TimeFrame;
   theme?: 'dark' | 'light' | Theme;
   chartType?: ChartType;
-  /**
-   * Indicators by id (`'rsi'`), or with their inputs (`{ id: 'ema', params: { period: 50 } }`).
-   * A new list is matched to what's on the chart: added, removed, and one
-   * whose inputs changed put back with them (its style edits go).
-   */
+  /** Indicators by id (`'rsi'`), or with their inputs (`{ id: 'ema', params: { period: 50 } }`). */
   indicators?: IndicatorSpec[];
-  /**
-   * The bars: the chart shows these, and opens no stream of its own when it
-   * has them at mount. A new array that goes on from the last one, its last
-   * bar changed or bars added after it (`[...bars.slice(0, -1), forming]`,
-   * `[...bars, next]`), goes in as a live feed's ticks do (`updateLastBar`,
-   * `appendBar`, `appendBars`): the view isn't reset, only the end is
-   * computed again, and alerts follow the price. Any other new array is a new
-   * series (`setData`): the view goes back to the newest bar and every
-   * indicator is computed again. So is one after a stream, or code through
-   * the ref, gave the chart bars of its own. A new array that changes one of
-   * the last three bars before the forming one, its time the same, goes in
-   * as a correction (`updateBar`): the view stays, and the indicators are
-   * computed again from that bar. A change further back is a new series.
-   */
+  /** Controlled OHLCV bar series. */
   data?: OHLCBar[];
   /** The stream's feed (Binance by default), taken when the stream connects. */
   adapter?: DataAdapter;
-  /** The stream's source as a feed the chart pulls from (`DataFeed`, `ManualFeed`); over `adapter` when both are given. */
+  /** The stream's source as a feed the chart pulls from (`DataFeed`, `PennyBackendFeed`); over `adapter` when both are given. */
   feed?: DataFeed;
-  /** `false`: no stream until you say so (no Binance by default); the chart waits for `data`. Default `true`. */
+  /** `false`: no stream until you say so; the chart waits for `data`. Default `true`. */
   stream?: boolean;
   historyLimit?: number;
-  /** What users can do on the chart; changes after mount are applied too (the keys given). */
+  /** What users can do on the chart; changes after mount are applied too. */
   features?: FeaturesConfig;
   autoScale?: boolean;
   signalMarkers?: SignalMarker[];
@@ -86,20 +83,37 @@ export interface PennyChartProps {
   /** Style overrides, by key: all of your app's (`chart.setOverrides`). */
   overrides?: ChartStyleOverrides;
   watermarkText?: string;
-  /**
-   * Chart options the props don't cover (`maxBarSpacing`, `rightMargin`,
-   * `renderer`…), merged over the component's defaults at mount; later
-   * changes are not applied. `chartType`, `theme` and `autoScale` always come
-   * from their props.
-   */
+  /** Controlled working orders rendered on the chart. */
+  orders?: TradingOrder[];
+  /** Controlled open positions rendered on the chart. */
+  positions?: TradingPosition[];
+  /** Optional `ExecutionAdapter` (e.g. `PaperExecutionAdapter` or broker OMS) wired via `connectExecution`. */
+  executionAdapter?: ExecutionAdapter | null;
+  /** Options passed to `connectExecution` when `executionAdapter` is set. */
+  executionConfig?: ExecutionConfig;
+  /** Controlled active drawing tool (`'trendLine'`, `'fibRetracement'`, or `null` for pointer/idle). */
+  activeDrawingTool?: DrawingToolType | null;
+  /** Controlled drawing magnet mode (`'off' | 'weak' | 'strong'`). */
+  magnetMode?: 'off' | 'weak' | 'strong';
+  /** Controlled display time zone (`'UTC'`, `'Asia/Ho_Chi_Minh'`, `'exchange'`, or `null`). */
+  timeZone?: TimeZoneSetting;
+  /** Chart options merged over defaults at mount. */
   options?: Partial<ChartOptions>;
-  /**
-   * Called with the chart when it is made, on mount: once, or twice in
-   * React's StrictMode in development, which mounts twice (the first chart
-   * is destroyed). The ref's `getChart()` gives it too.
-   */
   onReady?: (chart: Chart) => void;
   onCrosshairMove?: (payload: unknown) => void;
+  onBarClick?: (payload: BarClickPayload) => void;
+  onOrderPlace?: (payload: OrderPlacePayload) => void;
+  onOrderModify?: (payload: OrderModifyPayload) => void;
+  onOrderCancel?: (payload: OrderCancelPayload) => void;
+  onPositionModify?: (payload: PositionModifyPayload) => void;
+  onPositionClose?: (payload: PositionClosePayload) => void;
+  onPositionReverse?: (payload: { positionId: string }) => void;
+  onExecutionFill?: (payload: FillEvent) => void;
+  onDrawingCreate?: (payload: DrawingCreatePayload) => void;
+  onDrawingUpdate?: (payload: { id: string }) => void;
+  onDrawingRemove?: (payload: DrawingRemovePayload) => void;
+  onDrawingToolChange?: (payload: { tool: DrawingToolType | null }) => void;
+  onReplayStep?: (payload: unknown) => void;
   className?: string;
   style?: CSSProperties;
 }
@@ -108,6 +122,27 @@ function resolveTheme(theme: 'dark' | 'light' | Theme | undefined): Theme {
   if (!theme || theme === 'dark') return DARK_THEME;
   if (theme === 'light') return LIGHT_THEME;
   return theme;
+}
+
+function useChartEvent<T>(
+  chartRef: React.RefObject<Chart | null>,
+  event: ChartEventType,
+  callback: ((payload: T) => void) | undefined,
+  unwrapPayload = true,
+): void {
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart || !callback) return;
+    const listener = (ev: unknown) => {
+      if (unwrapPayload && ev && typeof ev === 'object' && 'payload' in ev) {
+        callback((ev as { payload: T }).payload);
+      } else {
+        callback(ev as T);
+      }
+    };
+    chart.on(event, listener as (e: unknown) => void);
+    return () => chart.off(event, listener as (e: unknown) => void);
+  }, [chartRef, event, callback, unwrapPayload]);
 }
 
 export const PennyChart = forwardRef<PennyChartRef, PennyChartProps>(
@@ -131,9 +166,29 @@ export const PennyChart = forwardRef<PennyChartRef, PennyChartProps>(
       tradeZoneStyle,
       overrides,
       watermarkText,
+      orders,
+      positions,
+      executionAdapter,
+      executionConfig,
+      activeDrawingTool,
+      magnetMode,
+      timeZone,
       options,
       onReady,
       onCrosshairMove,
+      onBarClick,
+      onOrderPlace,
+      onOrderModify,
+      onOrderCancel,
+      onPositionModify,
+      onPositionClose,
+      onPositionReverse,
+      onExecutionFill,
+      onDrawingCreate,
+      onDrawingUpdate,
+      onDrawingRemove,
+      onDrawingToolChange,
+      onReplayStep,
       className,
       style,
     } = props;
@@ -141,9 +196,7 @@ export const PennyChart = forwardRef<PennyChartRef, PennyChartProps>(
     const containerRef = useRef<HTMLDivElement>(null);
     const chartRef = useRef<Chart | null>(null);
     const indicatorIdsRef = useRef<Map<string, string>>(new Map());
-    /** The bars last given to the chart (`feedBars`). */
     const fedRef = useRef<FedBars | null>(null);
-    /** The stream open now (`symbol|timeframe`), or null. */
     const streamKeyRef = useRef<string | null>(null);
     const featuresRef = useRef(JSON.stringify(features ?? null));
 
@@ -193,8 +246,7 @@ export const PennyChart = forwardRef<PennyChartRef, PennyChartProps>(
 
       fedRef.current = data ? feedBars(chart, data, null) : null;
       if (!data && stream) {
-        // A feed when given, else the adapter (Binance by default).
-        const source = feed ? { feed: feed } : { adapter: adapter ?? new BinanceAdapter() };
+        const source = feed ? { feed } : { adapter: adapter ?? new BinanceAdapter() };
         chart.connect({ ...source, symbol, timeframe, historyLimit });
         streamKeyRef.current = `${symbol}|${timeframe}`;
       }
@@ -210,7 +262,6 @@ export const PennyChart = forwardRef<PennyChartRef, PennyChartProps>(
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
-    // A stream of its own while it has no data; `stream={false}` closes it. Data given later leaves it be.
     useEffect(() => {
       const chart = chartRef.current;
       if (!chart) return;
@@ -225,8 +276,7 @@ export const PennyChart = forwardRef<PennyChartRef, PennyChartProps>(
       streamKeyRef.current = key;
 
       chart.disconnectStream();
-      // A feed when given, else the adapter (Binance by default).
-      const source = feed ? { feed: feed } : { adapter: adapter ?? new BinanceAdapter() };
+      const source = feed ? { feed } : { adapter: adapter ?? new BinanceAdapter() };
       chart.connect({ ...source, symbol, timeframe, historyLimit });
       if (watermarkText !== undefined) {
         chart.setWatermark(watermarkText);
@@ -251,7 +301,6 @@ export const PennyChart = forwardRef<PennyChartRef, PennyChartProps>(
     useEffect(() => {
       const chart = chartRef.current;
       if (!chart) return;
-      // Without data, the next bars are a new series: a stream may have come in between.
       fedRef.current = data ? feedBars(chart, data, fedRef.current) : null;
     }, [data]);
 
@@ -276,8 +325,6 @@ export const PennyChart = forwardRef<PennyChartRef, PennyChartProps>(
       if (tradeZoneStyle) chartRef.current?.setTradeZoneStyle(tradeZoneStyle);
     }, [tradeZoneStyle]);
 
-    // All of the host's overrides: keys left out of the prop are taken away.
-    // Without the prop, overrides set through the chart itself are left alone.
     const overridesGiven = useRef(false);
     useEffect(() => {
       if (overrides === undefined && !overridesGiven.current) return;
@@ -285,14 +332,65 @@ export const PennyChart = forwardRef<PennyChartRef, PennyChartProps>(
       chartRef.current?.setOverrides(overrides ?? {});
     }, [overrides]);
 
+    // Host-controlled trading, drawing, magnet, and timeZone props
+    useEffect(() => {
+      if (orders !== undefined) chartRef.current?.setOrders(orders);
+    }, [orders]);
+
+    useEffect(() => {
+      if (positions !== undefined) chartRef.current?.setPositions(positions);
+    }, [positions]);
+
+    useEffect(() => {
+      const chart = chartRef.current;
+      if (!chart || executionAdapter === undefined) return;
+      if (executionAdapter === null) {
+        chart.disconnectExecution();
+        return;
+      }
+      chart.connectExecution(executionAdapter, executionConfig);
+      return () => chart.disconnectExecution();
+    }, [executionAdapter, executionConfig]);
+
+    useEffect(() => {
+      if (activeDrawingTool !== undefined) {
+        chartRef.current?.setDrawingTool(activeDrawingTool);
+      }
+    }, [activeDrawingTool]);
+
+    useEffect(() => {
+      if (magnetMode !== undefined) {
+        chartRef.current?.setDrawingMagnetMode(magnetMode);
+      }
+    }, [magnetMode]);
+
+    useEffect(() => {
+      if (timeZone !== undefined) {
+        chartRef.current?.setTimeZone(timeZone);
+      }
+    }, [timeZone]);
+
+    // Keep exact handler reference identity on `onCrosshairMove` for legacy callers
     useEffect(() => {
       const chart = chartRef.current;
       if (!chart || !onCrosshairMove) return;
       const handler = onCrosshairMove as (e: unknown) => void;
       chart.on('crosshairMove', handler);
-      // A new handler (an inline one is new each render) replaces this one.
       return () => chart.off('crosshairMove', handler);
     }, [onCrosshairMove]);
+    useChartEvent(chartRef, 'barClick', onBarClick);
+    useChartEvent(chartRef, 'orderPlace', onOrderPlace);
+    useChartEvent(chartRef, 'orderModify', onOrderModify);
+    useChartEvent(chartRef, 'orderCancel', onOrderCancel);
+    useChartEvent(chartRef, 'positionModify', onPositionModify);
+    useChartEvent(chartRef, 'positionClose', onPositionClose);
+    useChartEvent(chartRef, 'positionReverse', onPositionReverse);
+    useChartEvent(chartRef, 'executionFill', onExecutionFill);
+    useChartEvent(chartRef, 'drawingCreate', onDrawingCreate);
+    useChartEvent(chartRef, 'drawingUpdate', onDrawingUpdate);
+    useChartEvent(chartRef, 'drawingRemove', onDrawingRemove);
+    useChartEvent(chartRef, 'drawingToolChange', onDrawingToolChange);
+    useChartEvent(chartRef, 'replayStep', onReplayStep);
 
     return (
       <div

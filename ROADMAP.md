@@ -50,18 +50,14 @@ Tài liệu này định nghĩa lộ trình kỹ thuật nhằm giải quyết t
 
 ---
 
-### Phase 3 — Tách nhỏ Kiến trúc Monolith & Tối ưu Gói `@1penny/react`
+### Phase 3 — Tách nhỏ Kiến trúc Monolith & Tối ưu Gói `@1penny/react` *(Đã hoàn thành)*
 
-1. **Phân rã nội bộ `Chart.ts` và `DrawingManager.ts`** *(giữ nguyên 100% Public API)*:
-   - Tách `Chart.ts` thành 4 mô-đun độc lập dưới `packages/library/src/controllers/`:
-     - `SeriesLifecycleController`: quản lý `setData`, `appendBar`, `updateLastBar`, `updateBar`, `HistoryPager` và `StreamManager`.
-     - `IndicatorCoordinator`: điều phối `IndicatorEngine`, `IndicatorWorkerPool` và các pane phụ.
-     - `ReplayCoordinator`: điều phối `ReplayManager`, `ReplayStepLoader` và ẩn/hiện markers/trade zones theo thời gian replay.
-     - `TradingOverlayController`: cầu nối giữa `TradingManager`, thao tác kéo thả đường giá trên canvas và `ExecutionAdapter`.
-   - Tách `DrawingManager.ts` thành `DrawingStore` (dữ liệu & undo/redo), `DrawingHitTester` (bắt điểm & nam châm) và `DrawingClipboard` (copy/paste/group).
-2. **Nâng cấp `@1penny/react` (`<PennyChart />`) cho Kiến trúc Host-Controlled UI**:
-   - Bổ sung đầy đủ reactive props & callbacks cho giao dịch và công cụ vẽ (`orders`, `positions`, `activeDrawingTool`, `drawings`, `replayState`, `onOrderPlace`, `onOrderModify`, `onOrderCancel`, `onPositionModify`, `onPositionClose`, `onDrawingChange`).
-   - Giúp ứng dụng React dùng hệ thống control riêng (như HeroUI + Tabler Icons) điều khiển trực tiếp lõi `Chart` nhẹ và mượt mà không cần nhúng khung UI DOM của `ChartWidget`.
+- [x] **Phân rã nội bộ `Chart.ts` và `DrawingManager.ts`** *(giữ nguyên 100% Public API)*:
+  - Tách các mô-đun điều phối độc lập dưới `packages/library/src/controllers/` (`TradingExecutionController` cho cầu nối `TradingManager` ↔ `ExecutionAdapter`, `DataExportController` cho xuất dữ liệu CSV/JSON) song song với các coordinator sẵn có (`DataManager`, `HistoryPager`, `SeriesStore`, `replay/`, `state/`, `trading/`).
+  - Tách `drawingClipboard` (`DrawingClipboard`, `sharedDrawingClipboard`) và `drawingGroups` (`listDrawingGroups`, `reorderDrawingList`, `mutateDrawingGroup`, `createDrawingGroup`) khỏi `DrawingManager.ts` cùng các mô-đun `drawingState`, `drawingHistory`, `magnetSnap`, `DrawingSelection`, `DrawingDrag`.
+- [x] **Nâng cấp `@1penny/react` (`<PennyChart />`) cho Kiến trúc Host-Controlled UI**:
+  - Bổ sung đầy đủ reactive props & callbacks đã unwrap payload cho giao dịch, replay và công cụ vẽ (`orders`, `positions`, `executionAdapter`, `executionConfig`, `activeDrawingTool`, `magnetMode`, `timeZone`, `onBarClick`, `onOrderPlace`, `onOrderModify`, `onOrderCancel`, `onPositionModify`, `onPositionClose`, `onPositionReverse`, `onExecutionFill`, `onDrawingCreate`, `onDrawingUpdate`, `onDrawingRemove`, `onDrawingToolChange`, `onReplayStep`).
+  - Cho phép ứng dụng React dùng hệ thống control riêng (như HeroUI + Tabler Icons) điều khiển trực tiếp lõi `Chart` nhẹ mà không phải tải khung UI DOM của `ChartWidget`.
 
 ---
 

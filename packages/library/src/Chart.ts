@@ -49,11 +49,10 @@ import type { ResolvedLayout, ChartStyleKey, ChartStyleOverrides, ChartStyleOver
 import { readChartTypeOptions, tickBarCount, barTimeUnit, readChartStyleOverrides, readIndicatorPlotStyles, readPaneStyle } from '@1penny/commons';
 import { PriceLines, type BidAsk, SymbolSeriesStore, CompareSymbolIndicator, CompareSymbolPaneIndicator, SpreadIndicator, CorrelationCoefficientIndicator, CorrelationLogIndicator, axisTimes, HiLoRenderer, PointAndFigureRenderer, isPriceLevelAlert, loadWebGL, gpuContextsLeft, whenGpuContextFree, idleCssCursor, isCrosshairCursor } from '@1penny/core';
 import type { GpuRenderer, RendererMode } from '@1penny/core';
-import { indicatorWorkerPool, INDICATOR_WORKER_MIN_BARS, THEME_LOOK_KEYS, valuePlots, panelScale, panelScaleTexts, panelTagText, type IndicatorWorkerLease } from '@1penny/core';
+import { indicatorWorkerPool, INDICATOR_WORKER_MIN_BARS, THEME_LOOK_KEYS, panelScale, panelScaleTexts, panelTagText, type IndicatorWorkerLease } from '@1penny/core';
 import { regularHoursFilter } from './regularHours.js';
 import { ChartA11y } from './chartA11y.js';
 import { barDateZone, barsAreDaily, zonedDateFormatter } from '@1penny/commons';
-import { indicatorChipLabel } from './indicatorLabel.js';
 import type { ExportColumn } from '@1penny/core';
 import {
   RenderEngine,
@@ -110,7 +109,6 @@ import {
   KeyboardHandler,
   CrosshairTooltip,
   PinnedTooltip,
-  DataExporter,
   SessionBreaks,
   SessionShading,
   DEFAULT_SESSION_HOURS,
@@ -146,7 +144,12 @@ import { requiredPriceAxisWidth, nextPriceAxisWidth } from './layout/priceAxisWi
 import { LabelWidths } from './layout/labelWidths.js';
 import { VerticalPanGate } from './interaction/verticalPanGate.js';
 import { PluginManager } from './plugins/PluginManager.js';
-import { wireExecution } from './trading/wireExecution.js';
+import {
+  collectChartExportData,
+  downloadChartExport,
+  formatChartExportText,
+  TradingExecutionController,
+} from './controllers/index.js';
 import { overlaysForLayer, type ChartPlugin } from './plugins/contracts.js';
 import { ReplayStepLoader } from './replay/ReplayStepLoader.js';
 import { formingAt, intrabarPath, pathStop, type IntrabarPath } from './replay/intrabarPath.js';
@@ -212,14 +215,7 @@ export class Chart {
   private tradingRenderer: TradingRenderer;
   private eventBus: EventBus;
   private streamManager: StreamManager | null = null;
-  private executionAdapter: ExecutionAdapter | null = null;
-  /** What a confirmed bracket does with the adapter: `null` when `connectExecution` was not told. */
-  private executionBrackets: 'event' | 'place' | null = null;
-  /** The console was told once that a bracket did not reach the adapter. */
-  private bracketsWarned = false;
-  /** Waits for the first bracket confirmed with an adapter connected without `brackets`, to say so. */
-  private bracketWarner: (() => void) | null = null;
-  private execTeardown: (() => void) | null = null;
+  private executionController: TradingExecutionController;
   private autoScrollOnNewBar = true;
   /** The drawn series (Renko bricks…) the indicators were last worked out on; null: the data bars. */
   private indicatorsOnDrawn: DataSeries | null = null;
@@ -595,6 +591,15 @@ export class Chart {
     this.tradingManager.setRequestRender(() => this.engine.requestRender(LayerType.Overlay));
     this.tradingManager.setEventCallback((event, data) => {
       this.eventBus.emit(event as ChartEventType, data);
+    });
+    this.executionController = new TradingExecutionController({
+      eventBus: this.eventBus,
+      tradingManager: this.tradingManager,
+      isTradingEnabled: () => Boolean(this.features.trading),
+      setOrders: (orders) => this.setOrders(orders),
+      setPositions: (positions) => this.setPositions(positions),
+      latestMarketPrice: () => this.series.bars().at(-1)?.close ?? null,
+      onBeforeDisconnect: () => this.returnMarkToLive(),
     });
 
     // Rendering
@@ -2939,48 +2944,21 @@ export class Chart {
    * those on screen (`range: 'visible'`).
    */
   getExportData(options: { range?: 'all' | 'visible'; indicators?: boolean } = {}): { bars: OHLCBar[]; columns: ExportColumn[] } {
-    const data = this.exportBars();
-    let from = 0;
-    let to = data.length - 1;
-    if (options.range === 'visible') {
-      const { visibleRange } = this.viewport.getState();
-      from = Math.max(0, visibleRange.from);
-      to = Math.min(data.length - 1, visibleRange.to);
-    }
-    const bars = data.slice(from, to + 1);
-    if (options.indicators === false) return { bars, columns: [] };
-    const columns: ExportColumn[] = [];
-    for (const ind of this.indicatorEngine.getActiveIndicators()) {
-      const series = this.indicatorEngine.getOutput(ind.instanceId)?.series;
-      if (!series) continue;
-      const name = indicatorChipLabel(ind.id, ind.params, ind.descriptor.defaultConfig, ind.descriptor.shortName);
-      // Marks on some bars (`kind: 'markers'`) are no column: they are not values.
-      const plots = ind.descriptor.plots ? valuePlots(ind.descriptor.plots) : Object.keys(series.find((p) => p) ?? {}).map((key) => ({ key, title: key }));
-      for (const plot of plots) {
-        const title = plots.length > 1 ? ` ${plot.title ?? plot.key}` : '';
-        columns.push({ name: `${name}${title}`, values: bars.map((_, i) => series[from + i]?.[plot.key] ?? null) });
-      }
-    }
-    // Two alike (an SMA 20 on the close and one on RSI) get a number each, so no column is lost.
-    const seen = new Map<string, number>();
-    for (const column of columns) {
-      const count = (seen.get(column.name) ?? 0) + 1;
-      seen.set(column.name, count);
-      if (count > 1) column.name = `${column.name} (${count})`;
-    }
-    return { bars, columns };
+    return collectChartExportData({
+      allBars: this.exportBars(),
+      viewportState: this.viewport.getState(),
+      indicatorEngine: this.indicatorEngine,
+      options,
+    });
   }
 
   /** `getExportData` as CSV or JSON text. */
   getExportText(format: 'csv' | 'json' = 'csv', options: { range?: 'all' | 'visible'; indicators?: boolean } = {}): string {
-    const { bars, columns } = this.getExportData(options);
-    return format === 'json' ? DataExporter.toJSON(bars, columns) : DataExporter.toCSV(bars, columns);
+    return formatChartExportText(format, this.getExportData(options));
   }
 
   private download(format: 'csv' | 'json', filename: string | undefined, options: { range: 'all' | 'visible'; indicators?: boolean }): void {
-    const text = this.getExportText(format, options);
-    if (format === 'json') DataExporter.download(text, filename ?? 'chart-data.json', 'application/json');
-    else DataExporter.download(text, filename ?? 'chart-data.csv', 'text/csv');
+    downloadChartExport(format, this.getExportText(format, options), filename);
   }
 
   // --- Auto-save ---
@@ -3272,7 +3250,7 @@ export class Chart {
 
   /** Whether a paper account trades on the replay (it takes a mark price) rather than on the live price. */
   private replayTrades(): boolean {
-    return this.replaySession !== null && this.executionAdapter?.setMarkPrice !== undefined;
+    return this.replaySession !== null && this.executionController.acceptsMarkPrice();
   }
 
   /**
@@ -3618,33 +3596,7 @@ export class Chart {
    * `chart.on('executionError', …)`.
    */
   connectExecution(adapter: ExecutionAdapter, config: ExecutionConfig = {}): void {
-    if (!this.features.trading) {
-      throw new Error('connectExecution requires features.trading to be enabled');
-    }
-    this.disconnectExecution();
-    this.executionAdapter = adapter;
-    this.executionBrackets = config.brackets ?? null;
-    this.execTeardown = wireExecution(adapter, {
-      onIntent: (type, handler) => {
-        const wrapped = (e: ChartEvent) => handler(e.payload);
-        this.eventBus.on(type, wrapped);
-        return () => this.eventBus.off(type, wrapped);
-      },
-      setOrders: (orders) => this.setOrders(orders),
-      setPositions: (positions) => this.setPositions(positions),
-      onError: (error) => this.eventBus.emit('executionError', error),
-      onFill: (fill) => {
-        this.tradingManager.addFill(fill);
-        this.eventBus.emit('executionFill', fill);
-      },
-      getPositions: () => this.tradingManager.getPositions(),
-      marketPrice: () => this.series.bars().at(-1)?.close ?? null,
-      onBracketOrder: (order, bracket) => this.eventBus.emit('bracketOrder', { order, bracket }),
-    }, { brackets: config.brackets });
-    if (config.brackets === undefined) this.warnOfUnsentBrackets();
-    Promise.resolve(adapter.connect(config)).catch((cause) =>
-      this.eventBus.emit('executionError', { message: 'Execution connect failed', cause }),
-    );
+    this.executionController.connect(adapter, config);
   }
 
   /**
@@ -3653,43 +3605,12 @@ export class Chart {
    * `bracketPlace` event.
    */
   placesBrackets(): boolean {
-    return this.executionAdapter !== null && this.executionBrackets === 'place';
-  }
-
-  /**
-   * An adapter connected without saying what a bracket does: the first one
-   * confirmed is said in the console not to have reached it, once a chart.
-   */
-  private warnOfUnsentBrackets(): void {
-    if (this.bracketsWarned || this.bracketWarner) return;
-    const warnOnce = () => {
-      this.stopBracketWarner();
-      this.bracketsWarned = true;
-      console.warn("[Chart] A bracket was confirmed with an execution adapter connected, and was not sent to it: only the bracketPlace event went out. connectExecution(adapter, { brackets: 'place' }) sends it as an order; { brackets: 'event' } keeps the event and says nothing. 'place' becomes the default in the next major version.");
-    };
-    this.bracketWarner = warnOnce;
-    this.eventBus.on('bracketPlace', warnOnce);
-  }
-
-  private stopBracketWarner(): void {
-    if (!this.bracketWarner) return;
-    this.eventBus.off('bracketPlace', this.bracketWarner);
-    this.bracketWarner = null;
+    return this.executionController.placesBrackets();
   }
 
   /** Tear down the active execution adapter (if any) and stop routing intents. */
   disconnectExecution(): void {
-    this.returnMarkToLive();
-    this.executionBrackets = null;
-    this.stopBracketWarner();
-    if (this.execTeardown) {
-      this.execTeardown();
-      this.execTeardown = null;
-    }
-    if (this.executionAdapter) {
-      this.executionAdapter.disconnect();
-      this.executionAdapter = null;
-    }
+    this.executionController.disconnect();
   }
 
   /**
@@ -3722,7 +3643,7 @@ export class Chart {
 
   /** The connected execution adapter, or null (e.g. for adapter-specific calls). */
   getExecutionAdapter(): ExecutionAdapter | null {
-    return this.executionAdapter;
+    return this.executionController.getAdapter();
   }
 
   /** Ignored (stays hidden) when `features.barCountdown` is false. */
@@ -5490,7 +5411,7 @@ export class Chart {
    */
   private feedReplayForming(coarse: DataSeries, index: number, path: IntrabarPath, fraction: number): void {
     const session = this.replaySession;
-    if (!session || !this.executionAdapter?.setMarkPrice) return;
+    if (!session || !this.executionController.acceptsMarkPrice()) return;
     const fed = { time: session.fedTime, fraction: session.fedFraction };
     const feed = formingFeed(coarse, index, path, fraction, fed, (c, i) => this.replayPathOf(c, i));
     if (!feed) return;
@@ -5501,9 +5422,8 @@ export class Chart {
 
   /** Marks of a replay to a paper account in order, and the orders on the chart to the last of them. */
   private feedReplayMarks(marks: readonly ReplayMark[]): void {
-    const adapter = this.executionAdapter;
-    if (!adapter?.setMarkPrice) return;
-    for (const [price, time] of marks) adapter.setMarkPrice(price, time);
+    if (!this.executionController.acceptsMarkPrice()) return;
+    for (const [price, time] of marks) this.executionController.feedMarkPrice(price, time);
     const price = marks[marks.length - 1]?.[0];
     if (price !== undefined) this.tradingManager.setCurrentPrice(price);
   }
@@ -5654,9 +5574,7 @@ export class Chart {
 
   /** A replay step's price to an adapter that takes a mark (a paper account), and to the orders on the chart. */
   private feedReplayPrice(price: number, time?: number): void {
-    const adapter = this.executionAdapter;
-    if (!adapter?.setMarkPrice) return;
-    adapter.setMarkPrice(price, time);
+    if (!this.executionController.feedMarkPrice(price, time)) return;
     this.tradingManager.setCurrentPrice(price);
   }
 
@@ -5677,7 +5595,7 @@ export class Chart {
    */
   private feedReplaySteps(series: DataSeries, index: number): void {
     const session = this.replaySession;
-    if (!session || !this.executionAdapter?.setMarkPrice) return;
+    if (!session || !this.executionController.acceptsMarkPrice()) return;
     const feed = stepFeed(series, index, { time: session.fedTime, fraction: session.fedFraction });
     if (!feed) return;
     session.fedTime = feed.fed.time;

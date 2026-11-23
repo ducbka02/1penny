@@ -15,19 +15,25 @@ import { resolveDrawingOptions, newDrawingOptions, savedDrawingOptions, sanitize
 import { priceToY, timeToX, xToTime, yToPrice } from '../viewport/ScaleMapping.js';
 import type { UndoRedoManager, UndoableAction } from '../features/UndoRedoManager.js';
 import {
-  MAX_GROUP_NAME,
   cloneDrawing,
   cleanDrawingName,
   cloneOptions,
   newDrawingId,
-  newGroupId,
   reserveIds,
   sameAnchors,
   sameOptions,
   type DrawingOrderMove,
   type DrawingPatch,
 } from './drawingState.js';
-import { orderTarget, redoAction, undoAction } from './drawingHistory.js';
+import { redoAction, undoAction } from './drawingHistory.js';
+import { DrawingClipboard, sharedDrawingClipboard, SCREEN_PASTE_STEP } from './drawingClipboard.js';
+import {
+  cleanGroupName,
+  createDrawingGroup,
+  listDrawingGroups,
+  mutateDrawingGroup,
+  reorderDrawingList,
+} from './drawingGroups.js';
 import { drawingShortcut } from './drawingShortcuts.js';
 import { DrawingCreator, type CreationStep } from './DrawingCreator.js';
 import { snapToBar, snapToValues, type MagnetMode } from './magnetSnap.js';
@@ -48,13 +54,6 @@ type DrawingEventCallback = (event: string, data: unknown) => void;
 export type DrawingInteractionState = 'idle' | 'creating' | 'selected' | 'moving' | 'resizing';
 export type { MagnetMode } from './magnetSnap.js';
 
-/**
- * Copied drawings, shared by every chart on the page so a copy can be pasted
- * into another chart. `pastes` counts pastes since the copy, to stagger them.
- */
-const clipboard: { drawings: DrawingState[]; pastes: number } = { drawings: [], pastes: 0 };
-
-
 /** Anchor times below this, on bars timed by timestamps, are bar indices from old saves. */
 const LEGACY_INDEX_LIMIT = 1e7;
 
@@ -65,8 +64,6 @@ const MOUSE_REACH: DrawingReach = { line: 8, handle: 8 };
 const COPY_START_PX = 8;
 /** Arrow presses this close together (ms) on the same selection are one undo step. */
 const NUDGE_MERGE_MS = 1000;
-/** How far across and down the plot each paste of a drawing kept to the screen lands from the one before (a share of it). */
-const SCREEN_PASTE_STEP = 0.02;
 
 /** The modifier keys held, as the pointer last reported them. */
 export interface DrawingModifiers {
@@ -650,6 +647,8 @@ export class DrawingManager {
     this.toolAllowed = allowed;
   }
 
+  private readonly clipboard: DrawingClipboard = sharedDrawingClipboard;
+
   // --- Copy / paste ---
 
   /** Copy the selected drawings. Returns how many were copied. */
@@ -657,15 +656,12 @@ export class DrawingManager {
     const selected = this.getSelectedDrawingIds()
       .map((id) => this.drawings.find((d) => d.id === id))
       .filter((d): d is DrawingState => d !== undefined);
-    if (selected.length === 0) return 0;
-    clipboard.drawings = selected.map((d) => structuredClone(d)); // meta can nest
-    clipboard.pastes = 0;
-    return selected.length;
+    return this.clipboard.copy(selected);
   }
 
   /** Whether `paste()` would paste: something copied that this chart's tools take, and no drawing under way. */
   canPaste(): boolean {
-    return this.state !== 'creating' && clipboard.drawings.some((d) => this.canPasteType(d.type));
+    return this.clipboard.canPaste(this.state === 'creating', (type) => this.canPasteType(type));
   }
 
   private canPasteType(type: DrawingToolType): boolean {
@@ -678,34 +674,23 @@ export class DrawingManager {
    * a few more bars so it doesn't cover the original. Returns the new ids.
    */
   paste(): string[] {
-    if (clipboard.drawings.length === 0 || this.state === 'creating') return [];
-    const fromHere = clipboard.drawings.every((c) => this.drawings.some((d) => d.id === c.id));
-    clipboard.pastes += 1;
-    const shift = fromHere ? this.computeBarOffsetTime(3 * clipboard.pastes) : 0;
+    const drafts = this.clipboard.buildPasteDrafts({
+      isCreating: this.state === 'creating',
+      existingDrawings: this.drawings,
+      canAcceptType: (type) => this.canPasteType(type),
+      canAcceptPane: (paneId, type) =>
+        Boolean(this.panes?.hasPane(paneId)) && !this.registry.get(type)?.descriptor.priceOnly,
+      isScreenTool: (type) => this.onScreen(type),
+      barOffsetTime: (barsAhead) => this.computeBarOffsetTime(barsAhead),
+    });
+    if (drafts.length === 0) return [];
     const ids: string[] = [];
     this.batchUndo(() => {
-      for (const source of clipboard.drawings) {
-        if (!this.canPasteType(source.type)) continue;
-        // A pane's drawing goes back on that pane, where this chart has it; it means nothing on another.
-        if (source.paneId !== undefined && (!this.panes?.hasPane(source.paneId) || this.registry.get(source.type)?.descriptor.priceOnly)) continue;
-        ids.push(this.addDrawing({
-          ...(source.paneId !== undefined ? { paneId: source.paneId } : {}),
-          type: source.type,
-          anchors: this.onScreen(source.type)
-            ? offsetScreenPoints(source.anchors, SCREEN_PASTE_STEP * clipboard.pastes)
-            : source.anchors.map((a) => ({ ...a, time: a.time + shift })),
-          style: { ...source.style },
-          options: source.options ? cloneOptions(source.options) : undefined,
-          intervals: source.intervals,
-          meta: source.meta ? structuredClone(source.meta) : undefined,
-          name: source.name,
-        }));
-      }
+      for (const draft of drafts) ids.push(this.addDrawing(draft));
     });
     if (ids.length === 0) return ids;
     this.selection.clear();
     this.state = 'idle';
-    // One kept off this interval is pasted, but not selected unseen.
     for (const id of ids) if (this.isShown(id)) this.addToSelection(id);
     this.requestRender?.();
     return ids;
@@ -1134,16 +1119,10 @@ export class DrawingManager {
    * unknown or already there.
    */
   moveDrawing(id: string, to: DrawingOrderMove): boolean {
-    const from = this.drawings.findIndex((d) => d.id === id);
-    if (from < 0) return false;
-    const target = orderTarget(from, this.drawings.length, to);
-    if (target === from) return false;
-    const before = this.drawings.map((d) => d.id);
-    const next = [...this.drawings];
-    const [drawing] = next.splice(from, 1);
-    next.splice(target, 0, drawing);
-    this.drawings = next;
-    this.record({ type: 'drawingOrder', before: null, after: null, order: { before, after: next.map((d) => d.id) } });
+    const reordered = reorderDrawingList(this.drawings, id, to);
+    if (!reordered) return false;
+    this.drawings = reordered.next;
+    this.record(reordered.action);
     this.eventCallback?.('drawingUpdate', { id });
     this.requestRender?.();
     return true;
@@ -1151,30 +1130,20 @@ export class DrawingManager {
 
   /** Every group, its drawings bottom to top. */
   getGroups(): { id: string; name: string; ids: string[] }[] {
-    const groups = new Map<string, { id: string; name: string; ids: string[] }>();
-    for (const d of this.drawings) {
-      if (!d.group) continue;
-      const group = groups.get(d.group.id) ?? { id: d.group.id, name: d.group.name, ids: [] };
-      group.ids.push(d.id);
-      groups.set(d.group.id, group);
-    }
-    return [...groups.values()];
+    return listDrawingGroups(this.drawings);
   }
 
   /** Change every drawing of a group, as one undo step. */
   private updateGroup(groupId: string, change: (d: DrawingState) => void): boolean {
-    const members = this.drawings.filter((d) => d.group?.id === groupId);
-    if (members.length === 0) return false;
+    let changed = false;
     this.batchUndo(() => {
-      for (const d of members) {
-        const before = cloneDrawing(d);
-        change(d);
-        this.record({ type: 'drawingModify', before, after: cloneDrawing(d) });
-        this.eventCallback?.('drawingUpdate', { id: d.id });
-      }
+      changed = mutateDrawingGroup(this.drawings, groupId, change, (action, id) => {
+        this.record(action);
+        this.eventCallback?.('drawingUpdate', { id });
+      });
     });
-    this.requestRender?.();
-    return true;
+    if (changed) this.requestRender?.();
+    return changed;
   }
 
   /**
@@ -1182,24 +1151,16 @@ export class DrawingManager {
    * together; one leaves the group it was in. Returns the group's id, or null.
    */
   groupDrawings(ids: readonly string[], name?: string): string | null {
-    const wanted = new Set(ids);
-    // Ids of drawings no longer on the chart are passed over.
-    const members = this.drawings.filter((d) => wanted.has(d.id));
-    if (members.length < 2) return null;
-    const { id, number } = newGroupId();
-    const group = { id, name: cleanGroupName(name) || `Group ${number}` };
+    let groupId: string | null = null;
     this.batchUndo(() => {
-      for (const d of members) {
-        const before = cloneDrawing(d);
-        d.group = { ...group };
-        this.record({ type: 'drawingModify', before, after: cloneDrawing(d) });
-        this.eventCallback?.('drawingUpdate', { id: d.id });
-      }
+      groupId = createDrawingGroup(this.drawings, ids, name, (action, id) => {
+        this.record(action);
+        this.eventCallback?.('drawingUpdate', { id });
+      });
     });
-    this.requestRender?.();
-    return group.id;
+    if (groupId) this.requestRender?.();
+    return groupId;
   }
-
   ungroup(groupId: string): boolean {
     return this.updateGroup(groupId, (d) => { delete d.group; });
   }
@@ -1996,9 +1957,4 @@ function renderIsolated(
 function withName(drawing: DrawingState, name: string | undefined): DrawingState {
   const { name: _old, ...rest } = drawing;
   return name === undefined ? rest : { ...rest, name };
-}
-
-/** A group name as kept: trimmed and at most `MAX_GROUP_NAME` long. */
-function cleanGroupName(name: string | undefined): string {
-  return (name ?? '').trim().slice(0, MAX_GROUP_NAME);
 }

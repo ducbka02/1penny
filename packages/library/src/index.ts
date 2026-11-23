@@ -8,6 +8,7 @@ export { HISTORY_RETRY_MS, DEFAULT_HISTORY_PAGE_SIZE } from './HistoryPager.js';
 export type { HistoryLoader } from './HistoryPager.js';
 export { ThemeManager } from './ThemeManager.js';
 export { LayoutManager } from './layout/LayoutManager.js';
+export * from './controllers/index.js';
 export * from './plugins/index.js';
 export { parseOHLCV, DragDropImporter } from './io/index.js';
 export type { ParseResult, DragDropImporterCallbacks } from './io/index.js';

@@ -31,6 +31,13 @@ const { chart, ChartCtor } = vi.hoisted(() => {
     setWatermark: vi.fn(),
     setOverrides: vi.fn(),
     setFeatures: vi.fn(),
+    setOrders: vi.fn(),
+    setPositions: vi.fn(),
+    connectExecution: vi.fn(),
+    disconnectExecution: vi.fn(),
+    setDrawingTool: vi.fn(),
+    setDrawingMagnetMode: vi.fn(),
+    setTimeZone: vi.fn(),
     on: vi.fn(),
     off: vi.fn(),
     disconnectStream: vi.fn(),
@@ -267,6 +274,64 @@ describe('<PennyChart> (react)', () => {
     expect(offCalls).toEqual([first]);
     unmount();
     expect(chart.off.mock.calls.filter(([e]) => e === 'crosshairMove').map(([, h]) => h)).toEqual([first, second]);
+  });
+
+  it('drives orders, positions, executionAdapter, drawing tool, magnetMode, timeZone, and unwraps trading/drawing event payloads', () => {
+    const onOrderPlace = vi.fn();
+    const onPositionModify = vi.fn();
+    const onDrawingCreate = vi.fn();
+    const execAdapter = {
+      name: 'mock-exec',
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+      getConnectionState: () => 'connected' as const,
+      placeOrder: vi.fn(),
+      modifyOrder: vi.fn(),
+      cancelOrder: vi.fn(),
+      modifyPosition: vi.fn(),
+      closePosition: vi.fn(),
+      on: vi.fn(),
+      off: vi.fn(),
+      dispose: vi.fn(),
+    };
+
+    const orders = [{ id: 'o1', side: 'buy' as const, type: 'limit' as const, price: 61000, quantity: 1 }];
+    const positions = [{ id: 'p1', side: 'buy' as const, entryPrice: 60000, quantity: 1, stopLoss: 59000 }];
+
+    const { rerender, unmount } = render(
+      <PennyChart
+        stream={false}
+        orders={orders}
+        positions={positions}
+        executionAdapter={execAdapter}
+        executionConfig={{ brackets: 'place' }}
+        activeDrawingTool="trendLine"
+        magnetMode="strong"
+        timeZone="Asia/Ho_Chi_Minh"
+        onOrderPlace={onOrderPlace}
+        onPositionModify={onPositionModify}
+        onDrawingCreate={onDrawingCreate}
+      />,
+    );
+
+    expect(chart.setOrders).toHaveBeenCalledWith(orders);
+    expect(chart.setPositions).toHaveBeenCalledWith(positions);
+    expect(chart.connectExecution).toHaveBeenCalledWith(execAdapter, { brackets: 'place' });
+    expect(chart.setDrawingTool).toHaveBeenCalledWith('trendLine');
+    expect(chart.setDrawingMagnetMode).toHaveBeenCalledWith('strong');
+    expect(chart.setTimeZone).toHaveBeenCalledWith('Asia/Ho_Chi_Minh');
+
+    // Trigger wrapped event listener and verify payload unwrapping
+    const orderPlaceListener = chart.on.mock.calls.find(([ev]) => ev === 'orderPlace')?.[1];
+    orderPlaceListener?.({ type: 'orderPlace', timestamp: 1, payload: { side: 'buy', type: 'limit', price: 60500 } });
+    expect(onOrderPlace).toHaveBeenCalledWith({ side: 'buy', type: 'limit', price: 60500 });
+
+    // Clearing activeDrawingTool & detaching executionAdapter
+    rerender(<PennyChart stream={false} executionAdapter={null} activeDrawingTool={null} />);
+    expect(chart.setDrawingTool).toHaveBeenCalledWith(null);
+    expect(chart.disconnectExecution).toHaveBeenCalled();
+
+    unmount();
   });
 });
 
