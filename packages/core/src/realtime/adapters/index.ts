@@ -18,4 +18,22 @@ export { KrakenAdapter } from './KrakenAdapter.js';
 export type { KrakenAdapterOptions } from './KrakenAdapter.js';
 export { UpbitAdapter, UPBIT_MAX_CANDLES } from './UpbitAdapter.js';
 export type { UpbitAdapterOptions } from './UpbitAdapter.js';
+export {
+  OkxAdapter,
+  OKX_MAX_CANDLES,
+  okxBarInterval,
+  okxWsChannel,
+  fetchOkxCandles,
+  parseOkxWsMessage,
+  parseOkxRestCandles,
+  parseOkxCandleRow,
+  parseOkxInstruments,
+  parseOkxTicker,
+} from './OkxAdapter.js';
+export type {
+  OkxAdapterOptions,
+  OkxInstType,
+  OkxVolumeField,
+  FetchOkxCandlesParams,
+} from './OkxAdapter.js';
 export { ResamplingAdapter, withResampling, servesTimeframe, MAX_BASE_REQUESTS, MAX_BASE_RATIO, KEPT_BUCKETS, SYMBOL_ZONE_WAIT_MS } from './ResamplingAdapter.js';

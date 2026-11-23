@@ -204,6 +204,12 @@ export class TickAggregator extends Emitter<AggregatorEvents> {
     }
     this.newest = at;
     this.builtFromTrades = false;
+    if (this.currentBar && normalizeBarTime(this.currentBar.time) < at) {
+      // Next bar arrived before the venue's final frame for the previous bar:
+      // close the previous bar provisionally; a late closed frame still lands as `correction`.
+      this.emit('barClose', { ...this.currentBar, closed: true });
+      this.currentBar = null;
+    }
     if (closed && this.currentBar && normalizeBarTime(this.currentBar.time) === at) {
       // Close the bar
       this.currentBar = { ...bar, closed: true, tickCount: this.currentBar.tickCount + 1 };

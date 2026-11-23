@@ -25,15 +25,14 @@ Tài liệu này định nghĩa lộ trình kỹ thuật nhằm giải quyết t
 
 ---
 
-### Phase 1 — Xây dựng `OkxAdapter` & Chuẩn hóa Tầng Đồng bộ Dữ liệu (`@1penny/core`)
+### Phase 1 — Xây dựng `OkxAdapter` & Chuẩn hóa Tầng Đồng bộ Dữ liệu (`@1penny/core`) *(Đã hoàn thành)*
 
-1. **`OkxAdapter` hỗ trợ đầy đủ Spot & Perpetual (`USDT-SWAP`)**:
-   - **REST History & Paging**: Tự động chọn `/api/v5/market/candles` cho dữ liệu gần (< 1.440 phút) và `/api/v5/market/history-candles` khi `HistoryPager` phân trang lùi sâu về quá khứ.
-   - **WebSocket `candle1m` & Grace Window đầu phút**:
-     - Xử lý hiện tượng bản tin đầu tiên của phút `T + 1m` (`confirm = "0"`) tới trước bản tin chốt phút `T` (`confirm = "1"`) vài chục mili-giây: cho phép nhận `barCorrection` của phút `T` mà không ngắt kết nối hay vứt bỏ giá đóng cửa cuối cùng.
-     - Cô lập lỗi theo từng mã (`symbol`) khi subscribe nhiều luồng hoặc tải bù dữ liệu khuyết nến, không để 1 mã bảo trì làm treo toàn bộ stream.
-2. **`PennyBackendFeed` (Adapter kết nối API nội bộ)**:
-   - Cài đặt chuẩn `DataFeed` (`getBars`, `subscribeBars`, `subscribeQuotes`, `resolveSymbol`) làm việc trực tiếp với REST phân trang + WebSocket `/ws/market`, hỗ trợ gộp khung thời gian lớn (`H1`, `H4`, `D1`, `W1`) chuẩn xác từ đầu phút mà không làm lệch khối lượng giao dịch tích lũy trong phút hiện tại.
+- [x] **`OkxAdapter` hỗ trợ đầy đủ Spot & Perpetual (`USDT-SWAP`)**:
+  - Tự động chọn `/api/v5/market/candles` cho dữ liệu gần (< 1.400 nến) và `/api/v5/market/history-candles` khi `HistoryPager` phân trang lùi sâu về quá khứ; tự gom nhiều trang khi `limit > 300`.
+  - Xử lý race condition đầu phút trên WebSocket (`confirm = "0"` của `T+1m` tới trước `confirm = "1"` của `T`) thông qua rollover chốt tạm trong `TickAggregator` + `barCorrection` cập nhật cả nến đóng lẫn `previousClose`.
+  - Cô lập lỗi theo từng mã (`symbol`) khi subscribe quotes nhiều luồng.
+- [x] **`PennyBackendFeed` (Adapter kết nối API nội bộ)**:
+  - Cài đặt chuẩn `DataFeed` (`getBars`, `subscribeBars`, `subscribeQuotes`, `resolveSymbol`) dùng chung 1 WebSocket duy nhất cho nhiều biểu đồ, tính đúng delta volume nội phút cho các khung lớn (`H1`/`D1`...) không bị lệch khi `getBars` nạp lại lịch sử giữa phút, và chống ghi đè giá live bởi gói HTTP `/api/tickers` đến trễ.
 
 ---
 

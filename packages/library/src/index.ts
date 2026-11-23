@@ -235,9 +235,9 @@ export type { PositionLevels } from '@1penny/core';
 export { barIndexToX, xToBarIndex, priceToY, priceToYMapper, yToPrice, timeToX, xToTime, timestampToBarIndex } from '@1penny/core';
 
 // Re-export realtime module
-export { StreamManager, ReconnectManager, ReplayController, BinanceAdapter, MockAdapter, TickAggregator, CurrentPriceLine, PaperExecutionAdapter, WebSocketAdapter, PollingAdapter, CoinbaseAdapter, BybitAdapter, KrakenAdapter, UpbitAdapter, ResamplingAdapter, ManualFeed, adapterFromFeed, feedFromAdapter, isDataFeed, withResampling, servesTimeframe, KEPT_BUCKETS, TickBarBuilder, TickBarAdapter, withTickBars } from '@1penny/core';
+export { StreamManager, ReconnectManager, ReplayController, BinanceAdapter, MockAdapter, TickAggregator, CurrentPriceLine, PaperExecutionAdapter, WebSocketAdapter, PollingAdapter, CoinbaseAdapter, BybitAdapter, KrakenAdapter, UpbitAdapter, OkxAdapter, OKX_MAX_CANDLES, ResamplingAdapter, ManualFeed, PennyBackendFeed, createPennyBackendFeed, adapterFromFeed, feedFromAdapter, isDataFeed, withResampling, servesTimeframe, KEPT_BUCKETS, TickBarBuilder, TickBarAdapter, withTickBars } from '@1penny/core';
 export type { ReplayBarEvent, ReplayEventMap, ReplayOptions, ReplayStateChangeEvent, ReplayStatus } from '@1penny/core';
-export type { PaperExecutionOptions, WebSocketAdapterOptions, WsParseResult, PollingAdapterOptions, CoinbaseAdapterOptions, BybitAdapterOptions, KrakenAdapterOptions, UpbitAdapterOptions } from '@1penny/core';
+export type { PaperExecutionOptions, WebSocketAdapterOptions, WsParseResult, PollingAdapterOptions, CoinbaseAdapterOptions, BybitAdapterOptions, KrakenAdapterOptions, UpbitAdapterOptions, OkxAdapterOptions, OkxInstType, OkxVolumeField, PennyBackendFeedOptions } from '@1penny/core';
 export { DEFAULT_RECONNECT, DEFAULT_STREAM_CONFIG } from '@1penny/commons';
 // Datafeeds written for the callback-style JS API, and UDF servers, as a DataFeed
 export { feedFromJsApi, udfFeed, sessionsFromJsApi, symbolInfoFromJsApi } from '@1penny/core';
