@@ -1,0 +1,82 @@
+import type { IndicatorDescriptor, DataSeries, IndicatorConfig, IndicatorOutput, IndicatorValue } from '@1penny/commons';
+import { barsAreDaily } from '@1penny/commons';
+import { IndicatorBase } from '../IndicatorBase.js';
+import { IndicatorValueMap } from '../IndicatorValueMap.js';
+import { getIntParam } from '../params.js';
+import { periodKeyer } from '../periods.js';
+
+/**
+ * Session VWAP — the session VWAP (`vwap`'s default anchor) with its bands:
+ * a volume-weighted average of the typical price (H+L+C)/3 that starts again
+ * each trading day, from midnight on the exchange's clock
+ * (`config.exchangeTimeZone`, else UTC), the way intraday traders read it.
+ * `avwap` starts at a bar you choose instead.
+ *
+ * `bands` (0–3) adds volume-weighted standard-deviation bands at ±1σ…±3σ around
+ * the session VWAP — the classic VWAP band envelope. On daily bars each
+ * session is one bar, whose bands sit on its line: it gives the line alone.
+ */
+export class SessionVWAPIndicator extends IndicatorBase {
+  descriptor: IndicatorDescriptor = {
+    readsExchangeTimeZone: true,
+    id: 'svwap',
+    name: 'Session VWAP',
+    placement: 'overlay' as const,
+    defaultConfig: { bands: 1 },
+    inputs: { bands: { kind: 'int', min: 0, max: 3 } },
+    shortName: 'SVWAP',
+    plots: [
+      { key: 'value', title: 'VWAP', color: 0, breakOn: 'session' },
+      { key: 'u1', title: '+1σ', color: 1, width: 1, lineStyle: 'dashed', opacity: 0.55, breakOn: 'session' },
+      { key: 'l1', title: '−1σ', color: 1, width: 1, lineStyle: 'dashed', opacity: 0.55, breakOn: 'session' },
+      { key: 'u2', title: '+2σ', color: 1, width: 1, lineStyle: 'dashed', opacity: 0.55, breakOn: 'session' },
+      { key: 'l2', title: '−2σ', color: 1, width: 1, lineStyle: 'dashed', opacity: 0.55, breakOn: 'session' },
+      { key: 'u3', title: '+3σ', color: 1, width: 1, lineStyle: 'dashed', opacity: 0.55, breakOn: 'session' },
+      { key: 'l3', title: '−3σ', color: 1, width: 1, lineStyle: 'dashed', opacity: 0.55, breakOn: 'session' },
+    ],
+  };
+
+  calculate(data: DataSeries, config: IndicatorConfig): IndicatorOutput {
+    // A day of one bar has no spread: its bands would be its line, neither drawn nor read.
+    const bands = barsAreDaily(data) === true ? 0 : Math.min(3, getIntParam(config, 'bands', 1, 0));
+    const values = new IndicatorValueMap();
+    const series: (IndicatorValue | null)[] = new Array(data.length).fill(null);
+    if (data.length === 0) return { values, series };
+
+    const keyOf = periodKeyer(data, 'session', config.exchangeTimeZone);
+    let sessionKey = keyOf(data[0].time);
+    let cumPV = 0;
+    let cumPV2 = 0;
+    let cumV = 0;
+
+    for (let i = 0; i < data.length; i++) {
+      const bar = data[i];
+      const key = keyOf(bar.time);
+      if (key !== sessionKey) {
+        cumPV = 0;
+        cumPV2 = 0;
+        cumV = 0;
+        sessionKey = key;
+      }
+      const typical = (bar.high + bar.low + bar.close) / 3;
+      cumPV += typical * bar.volume;
+      cumPV2 += typical * typical * bar.volume;
+      cumV += bar.volume;
+      if (cumV > 0) {
+        const vwap = cumPV / cumV;
+        const val: IndicatorValue = { value: vwap, session: sessionKey };
+        if (bands > 0) {
+          const variance = Math.max(0, cumPV2 / cumV - vwap * vwap);
+          const sd = Math.sqrt(variance);
+          for (let b = 1; b <= bands; b++) {
+            val[`u${b}`] = vwap + b * sd;
+            val[`l${b}`] = vwap - b * sd;
+          }
+        }
+        values.set(bar.time, val);
+        series[i] = val;
+      }
+    }
+    return { values, series };
+  }
+}

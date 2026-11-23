@@ -1,0 +1,489 @@
+import type {
+  StreamConfig,
+  ConnectionState,
+  ConnectionInfo,
+  FeedSubscriber,
+  OHLCBar,
+  RawTick,
+  AggregatedBar,
+  SymbolInfo,
+  TimeFrame,
+} from '@1penny/commons';
+import { DEFAULT_STREAM_CONFIG, DEFAULT_RECONNECT, barTimeUnit, isValidTimeZone, normalizeBarTime, timeframeBucketStart, timeframeSpansDays } from '@1penny/commons';
+import { Emitter } from './Emitter.js';
+import { TickAggregator } from './TickAggregator.js';
+import { ReconnectManager } from './ReconnectManager.js';
+import { CurrentPriceLine } from './CurrentPriceLine.js';
+import { UNNAMED_SOURCE_ERROR, streamSourceOf, type StreamSource } from './feeds/streamSource.js';
+
+export interface StreamEvents {
+  /**
+   * Historical data loaded. After a reconnect whose history ends before the
+   * bar the stream was building, that bar is on top, its trades kept.
+   */
+  snapshot: OHLCBar[];
+  /** New closed bar appended */
+  barClose: AggregatedBar;
+  /** Current forming bar updated */
+  barUpdate: AggregatedBar;
+  /**
+   * A closed bar older than the newest: the feed's last word on a bar
+   * already past (a late final, a revision). No live price: the chart
+   * corrects the bar with that time (`updateBar`).
+   */
+  barCorrection: OHLCBar;
+  /** Raw tick received */
+  tick: RawTick;
+  /** The current price changed, or the close its change is measured from did (a new bar opening at the last close) */
+  priceChange: { price: number; previousClose: number | null };
+  /** The best bid and ask changed (from ticks that carry them) */
+  quote: { bid?: number; ask?: number };
+  /** Connection state changed */
+  connectionChange: ConnectionInfo;
+  /** Error occurred */
+  error: { message: string; code?: string };
+  /** The feed learned about the symbol (its adapter's `symbolInfo` event) */
+  symbolInfo: SymbolInfo;
+  [key: string]: unknown;
+}
+
+/**
+ * StreamManager — orchestrates data flow from a feed to the chart.
+ *
+ * It reads its source as a feed (`StreamSource`): it asks for the newest
+ * bars, subscribes to the live ones and hears them as a `FeedSubscriber`.
+ * An adapter is wrapped into one where it comes in (`streamSourceOf`).
+ *
+ * Responsibilities:
+ * 1. Manages the source's lifecycle (connect, disconnect, reconnect)
+ * 2. Loads historical data on connect
+ * 3. Routes incoming data through TickAggregator
+ * 4. Maintains current price for the price line
+ * 5. Provides clean event interface for the Chart class
+ *
+ * Usage:
+ *   const stream = new StreamManager();
+ *   stream.on('snapshot', (bars) => chart.setData(bars));
+ *   stream.on('barClose', (bar) => chart.appendBar(bar));
+ *   stream.on('barUpdate', (bar) => chart.updateLastBar(bar));
+ *   stream.connect({ adapter, symbol: 'BTCUSDT', timeframe: '1m' });
+ */
+/** Silence after which a connection the page comes back to is taken for dead (a quiet market still sends a heartbeat or a tick). */
+const RESUME_STALE_MS = 20_000;
+/** Silence after which the heartbeat takes a connection for dead, and how often it looks. */
+const HEARTBEAT_STALE_MS = 60_000;
+const HEARTBEAT_EVERY_MS = 30_000;
+/** Bars of history loaded on a connect when the config names no limit. */
+const DEFAULT_HISTORY_LIMIT = 500;
+const DAY_MS = 86_400_000;
+
+/**
+ * A reconnect's history and, on top, the bar the stream was building after
+ * its last, in the history's time unit: the bars take the place of the ones
+ * shown from the history's first on, so the forming bar stays, and alerts
+ * cross from its close.
+ */
+function withForming(history: OHLCBar[], forming: AggregatedBar | null): OHLCBar[] {
+  if (!forming) return history;
+  const { time, open, high, low, close, volume } = forming;
+  return [...history, { time: normalizeBarTime(time) / barTimeUnit(history), open, high, low, close, volume }];
+}
+
+/** Whether a bar of `tf` at `time` starts where `zone`'s midnight counts from, and not on the epoch. */
+function onZoneGrid(time: number, tf: TimeFrame, zone: string): boolean {
+  return timeframeBucketStart(time, tf, { timeZone: zone }) === time && timeframeBucketStart(time, tf) !== time;
+}
+
+export class StreamManager extends Emitter<StreamEvents> {
+  private config: StreamConfig | null = null;
+  /** Where the bars come from: a feed, or an adapter as one. */
+  private source: StreamSource | null = null;
+  private aggregator: TickAggregator | null = null;
+  private reconnector: ReconnectManager;
+  readonly priceLine = new CurrentPriceLine();
+
+  private state: ConnectionState = 'disconnected';
+  private lastPrice: number | null = null;
+  private previousClose: number | null = null;
+  /** The previous close the last `priceChange` carried. */
+  private sentPreviousClose: number | null = null;
+  /** When the bar `previousClose` is the close of starts, ms: a correction of it moves the close. */
+  private previousCloseTime: number | null = null;
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private lastMessageTime = 0;
+  /** Bumped by every connect attempt and by disconnect — see doConnect. */
+  private connectSeq = 0;
+  /** The exchange's zone, where days built from ticks start (`setTimeZone`). */
+  private timeZone: string | null = null;
+  /** When the history's last bar starts, ms (null: no history yet): bars from ticks follow its grid. */
+  private historyEnd: number | null = null;
+
+  constructor() {
+    super();
+    this.reconnector = new ReconnectManager();
+    this.wireReconnector();
+  }
+
+  // --- Public API ---
+
+  async connect(config: StreamConfig): Promise<void> {
+    // Clean up previous connection
+    this.disconnect();
+
+    const source = streamSourceOf(config);
+    // A fresh load: no bars of the symbol are kept to merge its history with.
+    source.resampler?.renewZone(config.symbol);
+    this.config = { ...DEFAULT_STREAM_CONFIG, ...config } as StreamConfig;
+    this.source = source;
+    this.aggregator = new TickAggregator(config.timeframe);
+    this.historyEnd = null;
+    this.applyTickZone();
+
+    // Replace reconnector — clean up old listeners first
+    this.reconnector.removeAllListeners();
+    this.reconnector.stop();
+    this.reconnector = new ReconnectManager(config.reconnect ?? DEFAULT_RECONNECT);
+    this.wireReconnector();
+
+    // Wire aggregator events -> stream events
+    this.aggregator.on('bar', (bar) => {
+      this.emit('barUpdate', bar);
+      this.updatePrice(bar.close);
+    });
+    this.aggregator.on('barClose', (bar) => {
+      this.setPreviousClose(bar);
+      this.emit('barClose', bar);
+    });
+    // A bar already past, with its final values: not a live price, but the
+    // reference the price's change is measured from when it is the last closed bar.
+    this.aggregator.on('correction', (bar) => {
+      if (normalizeBarTime(bar.time) === this.previousCloseTime) this.previousClose = bar.close;
+      this.emit('barCorrection', bar);
+    });
+
+    // What the source sends -> the handlers below
+    source.listen(this.subscriber());
+
+    // Start connection
+    this.reconnector.start();
+    await this.doConnect();
+  }
+
+  disconnect(): void {
+    this.connectSeq++;
+    this.reconnector.stop();
+    this.stopHeartbeat();
+
+    if (this.source) {
+      this.source.release();
+      this.source.unsubscribe();
+      this.source = null;
+    }
+
+    this.aggregator?.reset();
+    this.aggregator?.removeAllListeners();
+    this.aggregator = null;
+    this.config = null;
+    this.historyEnd = null;
+    this.lastPrice = null;
+    this.previousClose = null;
+    this.previousCloseTime = null;
+    this.sentPreviousClose = null;
+
+    this.setState('disconnected');
+  }
+
+  /**
+   * Switch symbol or timeframe without full teardown.
+   * Reloads history and restarts streaming.
+   */
+  async switchTo(symbol: string, timeframe: TimeFrame): Promise<void> {
+    if (!this.config || !this.source) return;
+
+    // A deliberate switch isn't a dropped connection. Stop the reconnector
+    // around the disconnect so an adapter that reports 'disconnected' (or a
+    // retry already pending) can't schedule a doConnect that would later
+    // supersede this switch's history request.
+    this.reconnector.stop();
+    this.source.unsubscribe();
+    this.reconnector.start();
+    this.aggregator?.reset();
+    this.aggregator?.setTimeframe(timeframe);
+    this.lastPrice = null;
+    this.previousClose = null;
+    this.previousCloseTime = null;
+    this.sentPreviousClose = null;
+
+    // Another symbol or timeframe is a new series; the same again is merged with the bars loaded.
+    if (symbol !== this.config.symbol || timeframe !== this.config.timeframe) this.source.resampler?.renewZone(symbol);
+    this.config.symbol = symbol;
+    this.config.timeframe = timeframe;
+
+    await this.doConnect();
+  }
+
+  getConnectionState(): ConnectionState {
+    return this.state;
+  }
+
+  /**
+   * The exchange's zone (null: UTC). Bars built from ticks (`aggregateTicks`)
+   * follow the history they continue: days, weeks and months start at the
+   * zone's midnight, stamped at 00:00 UTC of their date when the history's
+   * are; the hour frames that divide a day (2h to 12h) start there only when
+   * the history's do, and keep the epoch's grid, as a feed's own 4h bars
+   * do, otherwise. A chart sets it from the symbol's info and its market.
+   * Throws a RangeError for a zone the browser doesn't know, keeping the
+   * zone it has.
+   */
+  setTimeZone(zone: string | null): void {
+    if (zone !== null && !isValidTimeZone(zone)) throw new RangeError(`Unknown time zone: ${zone}`);
+    this.timeZone = zone;
+    this.applyTickZone();
+  }
+
+  getConnectionInfo(): ConnectionInfo {
+    return {
+      state: this.state,
+      reconnectAttempt: this.reconnector.getAttempt(),
+      lastMessageTime: this.lastMessageTime,
+    };
+  }
+
+  getLastPrice(): number | null {
+    return this.lastPrice;
+  }
+
+  // --- Internal ---
+
+  /**
+   * Bars from ticks land on the history's bars: a feed's dated days, days at
+   * the exchange's midnight, and 4h bars on whichever grid the history's sit.
+   * A timeframe the feed lacks starts where the wrapper building it starts
+   * its bars, in the zone it keeps for the symbol: UTC days it built from
+   * hours (the feed named no zone) stay UTC's, whatever zone the chart has.
+   * Weeks and months it built from the feed's dated days hold the feed's
+   * dates, the exchange's: with no zone from the feed, a trade is dated in
+   * the chart's, as on the feed's own days.
+   */
+  private applyTickZone(): void {
+    const config = this.config;
+    if (!this.aggregator || !config) return;
+    const last = this.historyEnd;
+    const datedHistory = last !== null && last % DAY_MS === 0;
+    const built = this.source?.resampler?.bucketFor(config.symbol, config.timeframe);
+    if (built) {
+      // Only bars built from dated days are dated: ones from hours start at the zone's midnight.
+      const dated = built.dates === true && datedHistory;
+      this.aggregator.setTimeZone(built.timeZone ?? (dated ? this.timeZone : null), dated);
+      return;
+    }
+    this.aggregator.setTimeZone(this.tickZone(config.timeframe, last), datedHistory);
+  }
+
+  /** The zone whose midnight bars of `timeframe` built from ticks start at (null: UTC's, or the epoch's grid for hours). */
+  private tickZone(timeframe: TimeFrame, last: number | null): string | null {
+    const zone = this.timeZone;
+    if (zone === null || timeframeSpansDays(timeframe)) return zone;
+    return last !== null && onZoneGrid(last, timeframe, zone) ? zone : null;
+  }
+
+  private async doConnect(): Promise<void> {
+    if (!this.config || !this.source) return;
+    const seq = ++this.connectSeq;
+    const series = { symbol: this.config.symbol, timeframe: this.config.timeframe };
+
+    this.setState('connecting');
+
+    try {
+      // 1. Load historical data
+      const history = await this.source.getBars(series, this.config.historyLimit ?? DEFAULT_HISTORY_LIMIT);
+      // A newer connect, switchTo or disconnect started while this request
+      // was in flight (fast symbol/timeframe switching). Its history would
+      // land on top of the newer one, so drop it.
+      if (seq !== this.connectSeq || !this.source) return;
+
+      const last = history.length > 0 ? history[history.length - 1] : null;
+      this.historyEnd = last ? normalizeBarTime(last.time) : null;
+      this.applyTickZone();
+      this.seedAggregator(last);
+      // A reconnect whose history ends before the bar the stream was
+      // building: that bar's close is the market's now, the history's last
+      // an older one, which would move the price, the orders and the alerts back.
+      const forming = this.formingAfter(last);
+      if (last && !forming) {
+        this.setPreviousClose(last);
+        this.updatePrice(last.close);
+      }
+
+      this.emit('snapshot', withForming(history, forming));
+
+      // 2. Start streaming
+      this.source.subscribeBars(series);
+
+      this.startHeartbeat();
+    } catch (err) {
+      if (seq !== this.connectSeq) return;
+      const message = err instanceof Error ? err.message : String(err);
+      this.emit('error', { message, code: 'CONNECT_FAILED' });
+      this.setState('error');
+      this.reconnector.schedule(() => this.doConnect());
+    }
+  }
+
+  private wireReconnector(): void {
+    this.reconnector.on('attempt', ({ attempt, delay: _delay }) => {
+      // One event an attempt, with its number: the state is the same from the second on.
+      this.state = 'reconnecting';
+      this.emit('connectionChange', {
+        state: 'reconnecting',
+        reconnectAttempt: attempt,
+        lastMessageTime: this.lastMessageTime,
+      });
+    });
+    this.reconnector.on('giveUp', ({ attempts }) => {
+      this.setState('error');
+      this.emit('error', { message: `Reconnection failed after ${attempts} attempts`, code: 'RECONNECT_EXHAUSTED' });
+    });
+  }
+
+  /** The stream as its source's subscriber. */
+  private subscriber(): FeedSubscriber {
+    return {
+      connection: (state) => this.onConnection(state),
+      tick: (tick) => this.onTick(tick),
+      bar: (bar, closed) => this.onBar(bar, closed),
+      // A feed written in plain JavaScript may send no message.
+      error: (message) => this.emit('error', { message: message ?? UNNAMED_SOURCE_ERROR }),
+      // What the feed learned about the symbol
+      symbolInfo: (info) => {
+        if (info && typeof info === 'object') this.emit('symbolInfo', info);
+      },
+    };
+  }
+
+  private onConnection(state: ConnectionState): void {
+    this.lastMessageTime = Date.now();
+
+    if (state === 'connected') {
+      this.reconnector.onConnected();
+      this.setState('connected');
+    } else if (state === 'disconnected' || state === 'error') {
+      this.reconnector.schedule(() => this.doConnect());
+    }
+  }
+
+  private onTick(tick: RawTick): void {
+    this.lastMessageTime = Date.now();
+    this.emit('tick', tick);
+    if (tick.bid !== undefined || tick.ask !== undefined) this.emit('quote', { bid: tick.bid, ask: tick.ask });
+
+    if (this.config?.aggregateTicks && this.aggregator) {
+      this.aggregator.processTick(tick);
+    } else {
+      this.updatePrice(tick.price);
+    }
+  }
+
+  /** A bar the source formed itself (most do). */
+  private onBar(bar: OHLCBar, closed: boolean): void {
+    this.lastMessageTime = Date.now();
+    this.aggregator?.processBar(bar, closed);
+  }
+
+  /** The close the price's change is measured from: `bar`'s. */
+  private setPreviousClose(bar: OHLCBar): void {
+    this.previousClose = bar.close;
+    this.previousCloseTime = normalizeBarTime(bar.time);
+  }
+
+  /**
+   * The history's last bar is the newest the stream has seen, on every
+   * connect and switch, so a bar older than it is a correction, never one
+   * of another symbol's. Built from trades, it is the bar the next trades
+   * go on building: a feed's history ends on the bar still forming. A
+   * reconnect keeps the aggregator: a history ending before the bar the
+   * trades were building leaves that bar, and its trades, as they were,
+   * unless they built it on buckets they no longer start on (`seed`).
+   */
+  private seedAggregator(last: OHLCBar | null): void {
+    if (!this.aggregator) return;
+    this.aggregator.seed(last ? last.time : -Infinity);
+    if (last && this.config?.aggregateTicks) this.aggregator.resume(last);
+  }
+
+  /** The bar the stream was building, when it is newer than the history's last (a reconnect's), or null. */
+  private formingAfter(last: OHLCBar | null): AggregatedBar | null {
+    const bar = this.aggregator?.getCurrentBar() ?? null;
+    if (!bar || (last && normalizeBarTime(bar.time) <= normalizeBarTime(last.time))) return null;
+    return bar;
+  }
+
+  /**
+   * The price, sent when it or the close it is measured from moved: a new bar
+   * opening at the last close is level with it, where the price line would
+   * still measure it from the close before.
+   */
+  private updatePrice(price: number): void {
+    if (price === this.lastPrice && this.previousClose === this.sentPreviousClose) return;
+    this.lastPrice = price;
+    this.sentPreviousClose = this.previousClose;
+    this.priceLine.setPrice(price, this.previousClose ?? undefined);
+    this.emit('priceChange', { price, previousClose: this.previousClose });
+  }
+
+  private setState(state: ConnectionState): void {
+    if (this.state === state) return;
+    this.state = state;
+    this.emit('connectionChange', {
+      state,
+      reconnectAttempt: this.reconnector.getAttempt(),
+      lastMessageTime: this.lastMessageTime,
+    });
+  }
+
+  /**
+   * The page came back into view, or the network came back: don't wait up to
+   * a minute and a half for the heartbeat. A phone asleep stops a socket
+   * without closing it, so a connection silent longer than
+   * `RESUME_STALE_MS` reconnects now; after a network change any does. A
+   * retry waiting out its backoff goes now, and one that gave up gets a fresh
+   * round. A connect under way (a symbol switch) is left alone.
+   */
+  wake(reason: 'visible' | 'online'): void {
+    if (!this.source || !this.config) return;
+    if (this.state === 'connecting' || this.state === 'disconnected') return;
+    if (this.state === 'connected' && reason === 'visible'
+        && (!this.source.watchSilence || Date.now() - this.lastMessageTime <= RESUME_STALE_MS)) return;
+    // As switchTo: the reconnector stopped around the disconnect, so the
+    // adapter's 'disconnected' doesn't queue a retry behind this connect.
+    this.reconnector.stop();
+    this.source.unsubscribe();
+    this.reconnector.start();
+    void this.doConnect();
+  }
+
+  private startHeartbeat(): void {
+    this.stopHeartbeat();
+    this.heartbeatTimer = setInterval(() => {
+      const stale = this.source?.watchSilence === true && Date.now() - this.lastMessageTime > HEARTBEAT_STALE_MS;
+      if (stale && this.state === 'connected') {
+        this.emit('error', { message: 'Heartbeat timeout', code: 'HEARTBEAT_TIMEOUT' });
+        this.source?.unsubscribe();
+        this.reconnector.schedule(() => this.doConnect());
+      }
+    }, HEARTBEAT_EVERY_MS);
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+  }
+
+  dispose(): void {
+    this.disconnect();
+    this.removeAllListeners();
+  }
+}

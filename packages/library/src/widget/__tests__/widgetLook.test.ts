@@ -1,0 +1,279 @@
+import { describe, it, expect } from 'vitest';
+import { readFileSync, readdirSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { FIBONACCI } from '@1penny/commons';
+import { resolveWidgetUI, widgetUIVariables } from '../widgetUI.js';
+
+// A Windows checkout may turn the file's line endings into CRLF.
+const css = readFileSync(fileURLToPath(new URL('../WidgetStyles.css', import.meta.url)), 'utf8').replace(/\r\n/g, '\n');
+
+/** Every `--1p-*` declared in the first block matching `selector`, as written. */
+function declared(selector: string): Record<string, string> {
+  const start = css.indexOf(selector);
+  const block = css.slice(css.indexOf('{', start) + 1, css.indexOf('\n}', start));
+  const out: Record<string, string> = {};
+  for (const m of block.matchAll(/(--1p-[\w-]+):\s*([^;]+);/g)) out[m[1]] = m[2].trim();
+  return out;
+}
+
+/** A token's value with the `var(--1p-…)` it names filled in from the same block. */
+function resolved(tokens: Record<string, string>, value: string): string {
+  return value.replace(/var\((--1p-[\w-]+)\)/g, (_, name: string) => resolved(tokens, tokens[name] ?? `var(${name})`));
+}
+
+/** The body of the rule whose selector is exactly `selector`. */
+function ruleBody(selector: string): string {
+  const m = css.match(new RegExp(`(?:^|\\n)${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\{([^{}]*)\\}`));
+  if (!m) throw new Error(`no rule ${selector}`);
+  return m[1];
+}
+
+describe('the stylesheet’s look', () => {
+  const root = declared('.pcw-root {');
+
+  it('defaults to Modern: every token the `ui` option sets, at Modern’s value', () => {
+    const modern = widgetUIVariables(resolveWidgetUI('modern'));
+    for (const [name, value] of Object.entries(modern)) {
+      expect(root[name], name).toBeDefined();
+      expect(resolved(root, root[name]), name).toBe(resolved(root, value));
+    }
+  });
+
+  it('colours Modern as the editor it is drawn from, dark and light, at the specificity of the colours before it', () => {
+    // `:where()` keeps the selectors as weak as `.pcw-root` and its light rule, so a page's own rule still wins a tie.
+    const dark = declared(".pcw-root:where([data-pcw-ui='modern']) {");
+    expect(dark).toMatchObject({
+      '--1p-bg': '#1f1f1f',
+      '--1p-bg-surface': '#181818',
+      '--1p-bg-elevated': '#252526',
+      '--1p-border': '#2b2b2b',
+      '--1p-text': '#cccccc',
+      '--1p-text-muted': '#9d9d9d',
+      // The logo's amber for what you act on and pick, dark ink on it; a lighter amber as text.
+      '--1p-accent': '#f0a940',
+      '--1p-accent-fill': '#e8961e',
+      '--1p-accent-ink': '#1f1f1f',
+    });
+    const light = declared(".pcw-root[data-pcw-theme='light']:where([data-pcw-ui='modern']) {");
+    expect(light).toMatchObject({
+      '--1p-bg': '#ffffff',
+      '--1p-bg-surface': '#f8f8f8',
+      '--1p-border': '#e5e5e5',
+      '--1p-text': '#3b3b3b',
+      '--1p-text-muted': '#616161',
+      // Amber is too light as text on white: a deeper one there, the fill amber still.
+      '--1p-accent': '#8a5a10',
+      '--1p-accent-fill': '#e8961e',
+      '--1p-accent-ink': '#1f1f1f',
+    });
+    // A fill reads the fill token, so a look can tell text from fill; the others' fill is their accent.
+    expect(css).not.toMatch(/background(?:-color)?: var\(--1p-accent\)/);
+    expect(root['--1p-accent-fill']).toBe('var(--1p-accent)');
+    // After the colours it changes, so it wins over them.
+    expect(css.indexOf(".pcw-root:where([data-pcw-ui='modern']) {")).toBeGreaterThan(css.indexOf(".pcw-root[data-pcw-theme='light'] {"));
+    // Every colour the look before it sets, so none of them is left mixed in, but the kinds of symbol it shares.
+    const colours = (tokens: Record<string, string>) => Object.keys(tokens).filter((name) => !/^--1p-(kind-[13-5]|shadow-)/.test(name));
+    const base = declared('.pcw-root {');
+    const baseColours = colours(base).filter((name) => /^--1p-(bg|border|tooltip|text|accent|red|green|hover|active|divider|kind)/.test(name) && !/-(w|radius|shadow)$/.test(name));
+    expect(baseColours.filter((name) => !(name in dark))).toEqual([]);
+    expect(colours(declared(".pcw-root[data-pcw-theme='light'] {")).filter((name) => !(name in light))).toEqual([]);
+    // Its pick in the accent's fill, before the solid and underline switches, so a look of yours that asks for one gets it.
+    const pick = css.indexOf(".pcw-root:where([data-pcw-ui='modern']) {\n  --1p-on-bg: var(--1p-accent-fill);");
+    expect(pick).toBeGreaterThan(-1);
+    expect(pick).toBeLessThan(css.indexOf(".pcw-root[data-pcw-active='solid'] {"));
+    expect(pick).toBeLessThan(css.indexOf(".pcw-root[data-pcw-active='underline'] {"));
+  });
+
+  it('styles each layout switch the `ui` option sets', () => {
+    for (const attr of [
+      "[data-pcw-active='solid']",
+      "[data-pcw-active='underline']",
+      "[data-pcw-toolbar='floating']",
+      "[data-pcw-sidebar='floating']",
+      "[data-pcw-intervals='segmented']",
+    ]) {
+      expect(css.includes(`.pcw-root${attr}`), attr).toBe(true);
+    }
+  });
+
+  it('marks a tool group with a triangle in its button’s corner, not a dot like the tools’ anchors', () => {
+    const mark = ruleBody('.pcw-multi-dot');
+    expect(mark).toMatch(/clip-path: polygon\(/);
+    expect(mark).not.toContain('border-radius: 50%');
+    // In the very corner, away from the icon, and in the other corner right to left.
+    expect(mark).toContain('inset-block-end: 1px');
+    expect(mark).toContain('inset-inline-end: 1px');
+    expect(ruleBody("[dir='rtl'] .pcw-multi-dot")).toMatch(/clip-path: polygon\(/);
+  });
+
+  it('draws the icons’ lines at the look’s width, on the widget and in its portal, only when it sets one', () => {
+    expect(ruleBody("[data-pcw-icon-stroke='set'] .pc-icon")).toContain('stroke-width: var(--1p-icon-stroke)');
+    // The same width at every icon size: the line isn't scaled with the drawing.
+    expect(ruleBody("[data-pcw-icon-stroke='set'] .pc-icon > *")).toContain('vector-effect: non-scaling-stroke');
+    // Its filled dots (a tool's anchors) shrink with the line, so they don't outweigh it.
+    expect(ruleBody("[data-pcw-icon-stroke='set'] .pc-icon > circle[stroke='none']")).toMatch(/transform: scale\(0\.\d+\)/);
+    // A small icon is no heavier than the rest: drawn as it is, its line was under 1 px.
+    expect(ruleBody("[data-pcw-icon-stroke='set'] .pc-icon:is([width='10'], [width='11'], [width='12'], [width='13'])"))
+      .toContain('stroke-width: min(var(--1p-icon-stroke), 1px)');
+  });
+
+  it('draws the chart type’s icon at the size of the other toolbar icons', () => {
+    expect(ruleBody(".pcw-dropdown-trigger[data-role='charttype'] svg")).toContain('width: var(--1p-icon)');
+  });
+
+  it('sets the small labels at the look’s label size', () => {
+    for (const sel of ['.pcw-dropdown-label', '.pcw-flyout-header', '.pcw-settings-section-title']) {
+      expect(ruleBody(sel), sel).toContain('font-size: var(--1p-label-size)');
+    }
+  });
+
+  it('sizes the bars and their controls by the tokens', () => {
+    expect(ruleBody('.pcw-toolbar')).toContain('height: var(--1p-toolbar-h)');
+    expect(ruleBody('.pcw-sidebar')).toContain('width: var(--1p-sidebar-w)');
+    expect(ruleBody('.pcw-btn')).toContain('height: var(--1p-control-h)');
+    expect(ruleBody('.pcw-btn-icon')).toContain('height: var(--1p-control-h)');
+    // The drawing tools take their own size, never wider than their column leaves room for.
+    expect(ruleBody('.pcw-sidebar-btn')).toContain('height: var(--1p-tool-size)');
+    // Declared on the column too, so a short one's fit (set on it) reaches its buttons.
+    const tool = ruleBody('.pcw-root, .pcw-sidebar');
+    expect(tool).toMatch(/--1p-tool-size: min\(var\(--1p-tool-h\), calc\(var\(--1p-sidebar-w\) - \d+px\), var\(--1p-tool-fit, \d+px\)\);/);
+    expect(tool).toMatch(/--1p-tool-icon-size: min\(var\(--1p-tool-icon\), /);
+    expect(ruleBody('.pcw-sidebar-btn svg')).toContain('width: var(--1p-tool-icon-size)');
+    // A tool menu opens at the column's edge; the pointer on its way there from a button crosses the
+    // column's side room, so the group's hover area spans it and the menu leaves no gap after it
+    // (a slow move through a 16 px gap closed the menu).
+    expect(ruleBody('.pcw-tool-group-wrap')).toMatch(/align-self:\s*stretch;/);
+    expect(ruleBody('.pcw-tool-group-wrap')).toMatch(/justify-content:\s*center;/);
+    expect(ruleBody('.pcw-flyout')).not.toMatch(/margin-inline-start:\s*[1-9]/);
+    // The cursor's glyph sits straight in its button: the browser's padding squeezed it to 14 of 16.
+    expect(ruleBody('.pcw-sidebar-btn')).toContain('padding: 0;');
+    expect(ruleBody('.pcw-sidebar-btn svg')).toContain('flex: none;');
+    // The dock's rail, as wide as the tools on the other side, has buttons as theirs.
+    const panels = readFileSync(fileURLToPath(new URL('../WidgetPanels.css', import.meta.url)), 'utf8').replace(/\r\n/g, '\n');
+    expect(panels.match(/\n\.pcw-dock-btn \{([^{}]*)\}/)?.[1]).toContain('height: var(--1p-tool-size)');
+    expect(ruleBody('.pcw-dropdown-item')).toContain('min-height: var(--1p-menu-item-h)');
+    expect(ruleBody('.pcw-toolbar-sep')).toContain('width: var(--1p-sep-w)');
+    // The drawing tools' sections keep a hairline even where the toolbar drops its rules.
+    expect(ruleBody('.pcw-sidebar-divider')).toContain('height: max(1px, var(--1p-sep-w))');
+  });
+
+  it('gives each kind of part its own corners', () => {
+    expect(ruleBody('.pcw-btn')).toContain('border-radius: var(--1p-control-radius)');
+    expect(ruleBody('.pcw-dropdown')).toContain('border-radius: var(--1p-menu-radius)');
+    expect(ruleBody('.pcw-modal')).toContain('border-radius: var(--1p-dialog-radius)');
+    expect(ruleBody('.pcw-alerts-panel')).toContain('border-radius: var(--1p-panel-radius)');
+    expect(ruleBody('.pcw-tooltip')).toContain('border-radius: var(--1p-tooltip-radius)');
+    expect(ruleBody('.pcw-toast')).toContain('border-radius: var(--1p-toast-radius)');
+  });
+
+  it('sets type by the tokens: no type size or weight of its own', () => {
+    const own = [...css.matchAll(/(?<![\w-])(?:font-size:\s*\d[\d.]*px|font-weight:\s*[5-7]\d\d\b)/g)].map((m) => m[0]);
+    expect(own).toEqual([]);
+  });
+
+  it('reads only variables something declares', () => {
+    const declaredAnywhere = new Set([...css.matchAll(/(--1p-[\w-]+)\s*:/g)].map((m) => m[1]));
+    // The look's tokens, and the few the widget's code sets on an element itself.
+    const dir = fileURLToPath(new URL('..', import.meta.url));
+    const code = readdirSync(dir).filter((f) => f.endsWith('.ts')).map((f) => readFileSync(`${dir}/${f}`, 'utf8')).join('\n');
+    const set = new Set([
+      ...Object.keys(widgetUIVariables(resolveWidgetUI())),
+      ...[...code.matchAll(/setProperty\('(--1p-[\w-]+)'/g)].map((m) => m[1]),
+    ]);
+    // Read without a fallback, so a missing one would drop the declaration.
+    const read = new Set([...css.matchAll(/var\((--1p-[\w-]+)\)/g)].map((m) => m[1]));
+    expect([...read].filter((name) => !declaredAnywhere.has(name) && !set.has(name))).toEqual([]);
+  });
+
+  it('turns on no OpenType features but the ones its token names: none, unless your CSS sets it', () => {
+    const dir = fileURLToPath(new URL('..', import.meta.url));
+    const sheets = readdirSync(dir).filter((f) => f.endsWith('.css')).map((f) => readFileSync(`${dir}/${f}`, 'utf8')).join('\n');
+    // A list here would replace the token's on that part, and tags mean something else in each face.
+    const lists = [...sheets.matchAll(/font-feature-settings:\s*([^;]+);/g)].map((m) => m[1].trim());
+    expect(new Set(lists)).toEqual(new Set(['var(--1p-font-features)', 'inherit']));
+    expect(ruleBody('.pcw-root')).toContain('font-feature-settings: var(--1p-font-features);');
+    // The browser's control font resets them: the buttons and fields take the token through inherit.
+    const controls = sheets.match(/:where\(\.pcw-root\) :where\(input, select, textarea, button\) \{([^{}]*)\}/);
+    expect(controls?.[1]).toContain('font-feature-settings: inherit;');
+    expect(root['--1p-font-features']).toBe('normal');
+    // Only the stylesheet declares it, so a rule of yours on .pcw-root sets it with the `ui` option or without.
+    for (const preset of ['print', 'studio', 'terminal', 'capsule'] as const) {
+      expect(widgetUIVariables(resolveWidgetUI(preset)), preset).not.toHaveProperty('--1p-font-features');
+    }
+  });
+
+  it('uses every token the look sets', () => {
+    const unused = Object.keys(widgetUIVariables(resolveWidgetUI())).filter(
+      (name) => !css.includes(`var(${name})`) && !css.includes(`var(${name},`),
+    );
+    expect(unused).toEqual([]);
+  });
+
+  it('places its panels below the toolbar and beside the drawing tools, as the look sizes them', () => {
+    // The floating panels (the depth ladder is a page of the dock: it has no place of its own).
+    for (const panel of ['.pcw-alerts-panel', '.pcw-datawin', '.pcw-tree-panel']) {
+      expect(ruleBody(panel), panel).toContain('top: var(--1p-panel-top)');
+    }
+    expect(ruleBody('.pcw-style-panel')).toContain('inset-inline-start: var(--1p-panel-left)');
+  });
+
+  it('keeps tap targets on phones: the variants’ sizes give way under 768 px', () => {
+    const variants = css.slice(css.indexOf('/* === The look:'));
+    const phone = variants.slice(variants.indexOf('@media (max-width: 768px)'));
+    expect(phone.length).toBeLessThan(variants.length);
+    expect(phone).toContain(".pcw-root[data-pcw-intervals='segmented'] > .pcw-toolbar > .pcw-tf-group .pcw-btn");
+    expect(phone).toContain(".pcw-root[data-pcw-toolbar='floating'] > .pcw-toolbar");
+  });
+
+  it('writes directions logically, so a right-to-left widget mirrors', () => {
+    const physical = [...css.matchAll(/(?<![\w-])(?:text-align:\s*(?:left|right)|border-(?:left|right)(?:-color)?:|margin-(?:left|right):\s*auto)/g)].map((m) => m[0]);
+    expect(physical).toEqual([]);
+  });
+
+  it('spaces by Fibonacci numbers on a 4 px grid, with 2 and 6 under them: every step even', () => {
+    const space = Object.entries(root).filter(([name]) => name.startsWith('--1p-space-')).map(([, value]) => parseFloat(value));
+    expect(space).toEqual([2, 4, 6, 8, 12, 20, 32]);
+    expect(space.slice(1).filter((n) => n % 4 === 0).map((n) => n / 4)).toEqual((FIBONACCI as readonly number[]).slice(0, 5));
+    for (const n of space) expect(n % 2, String(n)).toBe(0);
+  });
+
+  it('pads its controls, bars and menu rows by the token for it, a step up the spacing', () => {
+    expect([root['--1p-control-pad'], root['--1p-bar-pad'], root['--1p-menu-row-pad']]).toEqual(['12px', '12px', '12px']);
+    expect(ruleBody('.pcw-toolbar')).toContain('padding: 0 var(--1p-bar-pad)');
+    for (const control of ['.pcw-btn', '.pcw-dropdown-trigger', '.pcw-toolbar-symbol']) expect(ruleBody(control), control).toContain('padding: 0 var(--1p-control-pad)');
+    for (const row of ['.pcw-dropdown-item', '.pcw-flyout-item', '.pcw-context-item']) expect(ruleBody(row), row).toContain('var(--1p-menu-row-pad)');
+  });
+
+  it('rounds the bars’ text buttons up to whole pixels, with no specificity', () => {
+    expect(root['--1p-text-w']).toBe('calc-size(max-content, round(up, size, 1px))');
+    expect(css).toMatch(/:where\([^)]*\.pcw-toolbar \.pcw-btn[^)]*\) \{\n  width: var\(--1p-text-w, auto\);/);
+  });
+
+  it('nests a menu’s corners: its rows’ corner is its own less its padding', () => {
+    expect(css).toContain('--1p-menu-item-radius: max(0px, calc(var(--1p-menu-radius) - var(--1p-menu-pad)))');
+    for (const menu of ['.pcw-dropdown', '.pcw-flyout', '.pcw-context-menu']) {
+      expect(ruleBody(menu), menu).toContain('padding: var(--1p-menu-pad)');
+    }
+    for (const row of ['.pcw-dropdown-item', '.pcw-flyout-item', '.pcw-context-item']) {
+      expect(ruleBody(row), row).toContain('border-radius: var(--1p-menu-item-radius)');
+    }
+  });
+
+  it('shows a chosen button by the look’s tokens', () => {
+    expect(ruleBody('.pcw-btn.pcw-active')).toContain('background: var(--1p-on-bg)');
+    expect(ruleBody('.pcw-sidebar-btn.pcw-active')).toContain('background: var(--1p-on-icon-bg)');
+  });
+});
+
+describe('the symbol search on a phone', () => {
+  it('writes the exchange whole under the ticker, as the row’s second line, not cut in a narrow column', () => {
+    const css = readFileSync(fileURLToPath(new URL('../WidgetDialogs.css', import.meta.url)), 'utf8').replace(/\r\n/g, '\n');
+    const phone = css.slice(css.indexOf('/* A phone: both are the widget'));
+    const escaped = (selector: string) => selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const rule = (selector: string) => phone.match(new RegExp(`\n  ${escaped(selector)} \\{([^{}]*)\\}`))?.[1] ?? '';
+    expect(rule('.pcw-ss-exchange')).toContain('grid-column: 2');
+    expect(rule('.pcw-ss-exchange')).toContain('grid-row: 2');
+    expect(rule('.pcw-ss-exchange')).not.toContain('text-overflow');
+    expect(phone).not.toContain('fit-content(55px)');
+  });
+});

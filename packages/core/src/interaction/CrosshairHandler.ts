@@ -1,0 +1,643 @@
+import type { Point, ViewportState, Theme, DataSeries, TimeFormatter, TimeZoneSetting, ResolvedLineLook, CrosshairCursor } from '@1penny/commons';
+import { PRICE_AXIS_WIDTH, TIME_AXIS_HEIGHT, autoPricePrecision, timeParts, isDateOnly, barDateParts, barsAreDaily, barTimeUnit, lineDash, withAlpha } from '@1penny/commons';
+import { crosshairLooks } from './crosshairLooks.js';
+import { crispX, crispY } from '../charts/pixelGrid.js';
+import { panelPrecision, priceScaleText, roundStep } from '../axis/PriceAxis.js';
+import { AXIS_TAG_TEXT_INSET, fillTag } from '../ui/shapes.js';
+import { axisTimes } from '../charts/transforms/axisTimes.js';
+import { xToBarIndex, yToPrice, barIndexToX, barIndexToTime, priceToY, timeToX } from '../viewport/ScaleMapping.js';
+import { readableText } from '../finance/colorScale.js';
+import type { AxisSpan } from '../drawings/axisSpan.js';
+import { writtenDate } from '../axis/writtenDate.js';
+
+/** How strongly a drawing's span tints the axes: enough to see, light enough to read the scale through. */
+const SPAN_TINT_ALPHA = 0.2;
+
+/** A span's tint on the chart's own price axis (y) or the time axis (x), from one end to the other. */
+interface SpanTint {
+  axis: 'price' | 'time';
+  from: number;
+  to: number;
+  tint: string;
+}
+
+export type CrosshairCallback = (barIndex: number | null, point: Point | null) => void;
+
+export type CrosshairMode = 'normal' | 'magnet' | 'hidden';
+
+export class CrosshairHandler {
+  private position: Point | null = null;
+  private callback: CrosshairCallback | null = null;
+  private data: DataSeries = [];
+  private source: (() => DataSeries) | null = null;
+  private tz: TimeZoneSetting = null;
+  /** The exchange's zone: daily bars built at its midnight are dated there. */
+  private exchangeZone: string | null = null;
+  private timeFormatter: TimeFormatter | null = null;
+  private timesPastData = true;
+
+  /**
+   * Whether a slot past either end of the data gets a time on the axis,
+   * extrapolated from the bars' spacing. Off for bars not evenly spaced in
+   * time (tick bars, Renko bricks).
+   */
+  setTimesPastData(on: boolean): void {
+    this.timesPastData = on;
+  }
+
+  getTimesPastData(): boolean {
+    return this.timesPastData;
+  }
+
+  /** Times in your words (the crosshair's label), or null for its own. */
+  setTimeFormatter(formatter: TimeFormatter | null): void {
+    this.timeFormatter = formatter;
+  }
+
+  /** An IANA zone, a fixed UTC offset in minutes, or null for the browser's zone. */
+  setTimezoneOffset(tz: TimeZoneSetting): void {
+    this.tz = tz;
+  }
+
+  /** The exchange's zone (null: none known): the date a daily bar's label gives (`barDateParts`). */
+  setExchangeTimeZone(zone: string | null): void {
+    this.exchangeZone = zone;
+  }
+  private magnetMode = true;
+  private mode: CrosshairMode = 'magnet';
+  private cursor: CrosshairCursor = 'cross';
+  /** The span tints drawn on the axes this frame: a label cleared for a pill gets its tint back. */
+  private spanTints: SpanTint[] = [];
+  /** Fixed decimals for the price pill; `null` follows the price axis. */
+  private pricePrecision: number | null = null;
+  private locale = 'en-US';
+
+  // Deferred callback state — avoid calling during render
+  private syncedSlot: number | null = null;
+  private pendingBarIndex: number | null = null;
+  private pendingPoint: Point | null = null;
+  private callbackScheduled = false;
+  private lastCallbackBarIndex = -1;
+  /** Vertical span (px) where the hovered bar is reported; null = the price pane only. */
+  private reportTop: number | null = null;
+  private reportBottom: number | null = null;
+
+  setCallback(cb: CrosshairCallback): void {
+    this.callback = cb;
+  }
+
+  setData(data: DataSeries): void {
+    this.data = data;
+  }
+  /**
+   * Where the bars under the crosshair come from, read when it moves: the
+   * series on screen when that is not one bar per data bar (Renko bricks),
+   * so its slots index the right series. Null goes back to `setData`'s.
+   */
+  setDataSource(source: (() => DataSeries) | null): void {
+    this.source = source;
+  }
+
+  private series(): DataSeries {
+    return this.source?.() ?? this.data;
+  }
+
+
+  setMagnetMode(enabled: boolean): void {
+    this.magnetMode = enabled;
+    this.mode = enabled ? 'magnet' : 'normal';
+  }
+
+  setMode(mode: CrosshairMode): void {
+    this.mode = mode;
+    this.magnetMode = mode === 'magnet';
+  }
+
+  getMode(): CrosshairMode {
+    return this.mode;
+  }
+
+  /** What the pointer looks like: the arrow keeps the axis labels but draws no lines. */
+  setCursor(cursor: CrosshairCursor): void {
+    this.cursor = cursor;
+  }
+
+  getCursor(): CrosshairCursor {
+    return this.cursor;
+  }
+
+  /** Whether the crosshair's lines are drawn: not when it is hidden, nor with the arrow. */
+  drawsLines(): boolean {
+    return this.mode !== 'hidden' && this.cursor !== 'arrow';
+  }
+
+  setPricePrecision(precision: number | null): void {
+    this.pricePrecision = precision;
+  }
+
+  setLocale(locale: string): void {
+    this.locale = locale;
+  }
+
+  getPosition(): Point | null {
+    return this.position;
+  }
+
+  /**
+   * Mirror another chart's crosshair: a vertical line and time label at bar
+   * slot `slot` (null clears it). Never fires the callback, so a mirrored
+   * crosshair is not echoed back. The pointer's own crosshair wins.
+   */
+  setSyncedSlot(slot: number | null): void {
+    this.syncedSlot = slot !== null && Number.isFinite(slot) ? slot : null;
+  }
+
+  getSyncedSlot(): number | null {
+    return this.syncedSlot;
+  }
+
+  /**
+   * Also report the hovered bar between `top` and `bottom` (px), e.g. over
+   * indicator panes stacked above and below the price pane. The crosshair is
+   * still drawn on the price pane only. `null` reports on the price pane only.
+   */
+  setReportBounds(bounds: { top: number; bottom: number } | null): void {
+    this.reportTop = bounds?.top ?? null;
+    this.reportBottom = bounds?.bottom ?? null;
+  }
+
+  onPointerMove(pos: Point): void {
+    this.position = pos;
+  }
+
+  /** The bar last reported under the pointer (the callback's `barIndex`); null with none. */
+  getReportedBarIndex(): number | null {
+    return this.lastCallbackBarIndex >= 0 ? this.lastCallbackBarIndex : null;
+  }
+
+  /**
+   * Report the bar last reported again, in a microtask (before the next
+   * frame), though the pointer hasn't moved: its values changed (a bar
+   * corrected in place), and the callback otherwise fires only when the
+   * pointer reaches another bar.
+   */
+  refresh(): void {
+    if (this.lastCallbackBarIndex < 0 || !this.pendingPoint) return;
+    this.pendingBarIndex = this.lastCallbackBarIndex;
+    this.scheduleCallback();
+  }
+
+  onPointerLeave(): void {
+    this.position = null;
+    this.pendingBarIndex = null;
+    this.pendingPoint = null;
+    this.lastCallbackBarIndex = -1;
+    this.flushCallback(null, null);
+  }
+
+  render(ctx: CanvasRenderingContext2D, viewport: ViewportState, theme: Theme): void {
+    if (this.mode === 'hidden') return;
+    // The arrow draws no lines; the hovered bar is still reported below, for the legend.
+    const lines = this.cursor !== 'arrow';
+    if (!this.position) {
+      if (this.syncedSlot !== null && lines) this.renderSynced(ctx, viewport, theme, this.syncedSlot);
+      return;
+    }
+    const { chartRect } = viewport;
+    let { x, y } = this.position;
+
+    if (x < chartRect.x || x > chartRect.x + chartRect.width) return;
+    const plotBottom = chartRect.y + chartRect.height;
+    // Over the indicator panes the hovered bar is still reported; they draw
+    // their own crosshair.
+    if (y < Math.min(this.reportTop ?? chartRect.y, chartRect.y)) return;
+    if (y > Math.max(this.reportBottom ?? plotBottom, plotBottom)) return;
+    const inPlot = y >= chartRect.y && y <= plotBottom;
+
+    // The slot under the cursor — may lie past the newest bar (empty future
+    // space the chart can be panned into). Magnet snaps to slots there too,
+    // instead of welding the line to the last bar.
+    const slot = xToBarIndex(x, viewport);
+    const length = this.series().length;
+    const barIndex = Math.max(0, Math.min(length - 1, slot));
+    const onBar = slot >= 0 && slot < length;
+
+    if (this.magnetMode) {
+      x = barIndexToX(slot, viewport);
+    }
+
+    // Defer callback — only fire if bar changed, and fire AFTER render via microtask
+    if (barIndex !== this.lastCallbackBarIndex) {
+      this.pendingBarIndex = barIndex;
+      this.pendingPoint = { x, y };
+      this.lastCallbackBarIndex = barIndex;
+      this.scheduleCallback();
+    }
+    if (!inPlot || !lines) return;
+
+    // Subtle "hovered bar" tint — a translucent column behind the crosshair
+    // so users have unambiguous visual feedback about which bar they're
+    // sitting on. Especially helpful in dense candle charts.
+    const looks = crosshairLooks(theme);
+    if (this.magnetMode && onBar) drawBarTint(ctx, x, viewport, looks.vertical.color);
+
+    // Draw crosshair lines — minimal work, no DOM, no allocations
+    drawVerticalLine(ctx, x, chartRect, looks.vertical);
+
+    const h = looks.horizontal;
+    if (h.visible) {
+      ctx.setLineDash(lineDash(h.style, CROSSHAIR_DASH, h.width));
+      ctx.strokeStyle = h.color;
+      // On the same device-pixel row a drawing line this wide at this y takes.
+      const row = crispY(ctx, y, h.width);
+      ctx.lineWidth = row.width;
+      ctx.beginPath();
+      ctx.moveTo(chartRect.x, row.y);
+      ctx.lineTo(chartRect.x + chartRect.width, row.y);
+      ctx.stroke();
+    }
+
+    ctx.setLineDash([]);
+  }
+
+  /**
+   * Render the axis hover labels — price pill on the right, time pill on the
+   * bottom. Called on the UI pass (after the axes) so the badges always sit
+   * on top of the static axis labels, with a small notch.
+   *
+   * `timeAxisY` lets the host place the bottom label at the actual time axis
+   * baseline (which moves when bottom panels are open).
+   */
+  renderAxisLabels(
+    ctx: CanvasRenderingContext2D,
+    viewport: ViewportState,
+    theme: Theme,
+    data: DataSeries,
+    timeAxisY?: number,
+    /** Where the price scale wrote its labels: the pill clears those it would half cover. */
+    priceRows: readonly number[] = [],
+    /** Where the time axis wrote its labels: the time pill clears those it would half cover. */
+    timeColumns: readonly TimeColumn[] = [],
+  ): void {
+    if (this.mode === 'hidden') return;
+    if (!this.position) {
+      if (this.syncedSlot !== null) this.renderSyncedTimeLabel(ctx, viewport, theme, data, this.syncedSlot, timeAxisY, timeColumns);
+      return;
+    }
+    const { chartRect } = viewport;
+    let { x, y } = this.position;
+    if (x < chartRect.x || x > chartRect.x + chartRect.width) return;
+    if (y < chartRect.y || y > chartRect.y + chartRect.height) return;
+
+    const slot = xToBarIndex(x, viewport);
+    if (this.magnetMode) {
+      x = barIndexToX(slot, viewport);
+    }
+
+    const font = `600 ${theme.font.sizeSmall}px ${theme.font.family}`;
+
+    // ── Price pill (right axis) ──
+    const price = yToPrice(y, viewport);
+    const precision = this.pricePrecision ?? autoPricePrecision(viewport.priceRange.min, viewport.priceRange.max);
+    const priceText = priceScaleText(price, viewport, precision, this.locale);
+    const priceAxisX = chartRect.x + chartRect.width;
+    clearCoveredRows(ctx, priceRows, y, priceAxisX, viewport.priceAxisWidth ?? PRICE_AXIS_WIDTH, theme, this.spanTints);
+    drawAxisPill(ctx, {
+      text: priceText,
+      anchorX: priceAxisX,
+      anchorY: y,
+      orientation: 'right',
+      axisWidth: viewport.priceAxisWidth ?? PRICE_AXIS_WIDTH,
+      bg: crosshairLooks(theme).labelBackground,
+      fg: crosshairLooks(theme).labelText,
+      theme,
+      font,
+    });
+
+    // ── Time pill (bottom axis) ──
+    this.drawTimePill(ctx, viewport, theme, data, slot, x, timeAxisY, timeColumns);
+  }
+
+  /**
+   * A drawing's span on the axes (selected, or being drawn): a tint from its
+   * lowest to its highest price on its price axis and from its first to its
+   * last time on the time axis, each end labelled in the drawing's colour.
+   * The price is the drawing's viewport's (a pane's own), the time the chart's.
+   */
+  /** A frame's spans start: those of the last frame are gone. */
+  beginSpans(): void {
+    this.spanTints = [];
+  }
+
+  renderSpan(
+    ctx: CanvasRenderingContext2D,
+    span: AxisSpan,
+    main: ViewportState,
+    theme: Theme,
+    data: DataSeries,
+    timeAxisY?: number,
+  ): void {
+    const font = `600 ${theme.font.sizeSmall}px ${theme.font.family}`;
+    const tint = withAlpha(span.color, SPAN_TINT_ALPHA);
+    const fg = readableText(span.color);
+    if (span.prices.length > 0) this.renderPriceSpan(ctx, span, theme, font, tint, fg, main);
+    if (span.times.length > 0) this.renderTimeSpan(ctx, span, main, theme, data, font, tint, fg, timeAxisY);
+  }
+
+  private renderPriceSpan(ctx: CanvasRenderingContext2D, span: AxisSpan, theme: Theme, font: string, tint: string, fg: string, main: ViewportState): void {
+    const vp = span.viewport;
+    const plot = vp.chartRect;
+    const axisX = plot.x + plot.width;
+    const axisWidth = vp.priceAxisWidth ?? PRICE_AXIS_WIDTH;
+    const ys = span.prices.map((price) => priceToY(price, vp));
+    // The chart's precision on its own scale; a pane's as its price at the pointer reads.
+    const precision = vp === main
+      ? this.pricePrecision ?? autoPricePrecision(vp.priceRange.min, vp.priceRange.max)
+      : panelPrecision(roundStep(vp.priceRange.min, vp.priceRange.max, plot.height));
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(axisX, plot.y, axisWidth, plot.height);
+    ctx.clip();
+    if (ys.length > 1) {
+      ctx.fillStyle = tint;
+      ctx.fillRect(axisX, Math.min(...ys), axisWidth, Math.abs(ys[ys.length - 1] - ys[0]));
+      if (vp === main) this.spanTints.push({ axis: 'price', from: Math.min(...ys), to: Math.max(...ys), tint });
+    }
+    span.prices.forEach((price, i) => {
+      const y = ys[i];
+      if (y < plot.y || y > plot.y + plot.height) return;
+      drawAxisPill(ctx, { text: priceScaleText(price, vp, precision, this.locale), anchorX: axisX, anchorY: y, orientation: 'right', axisWidth, bg: span.color, fg, theme, font });
+    });
+    ctx.restore();
+  }
+
+  private renderTimeSpan(
+    ctx: CanvasRenderingContext2D, span: AxisSpan, main: ViewportState, theme: Theme, data: DataSeries,
+    font: string, tint: string, fg: string, timeAxisY?: number,
+  ): void {
+    const plot = main.chartRect;
+    const axisY = timeAxisY ?? plot.y + plot.height;
+    const xs = span.times.map((time) => timeToX(time, main));
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(plot.x, axisY, plot.width, TIME_AXIS_HEIGHT);
+    ctx.clip();
+    if (xs.length > 1) {
+      ctx.fillStyle = tint;
+      ctx.fillRect(Math.min(...xs), axisY, Math.abs(xs[xs.length - 1] - xs[0]), TIME_AXIS_HEIGHT);
+      this.spanTints.push({ axis: 'time', from: Math.min(...xs), to: Math.max(...xs), tint });
+    }
+    span.times.forEach((time, i) => {
+      const x = xs[i];
+      if (x < plot.x || x > plot.x + plot.width) return;
+      drawAxisPill(ctx, { text: this.formatTime(time, data), anchorX: x, anchorY: axisY, orientation: 'bottom', bg: span.color, fg, theme, font });
+    });
+    ctx.restore();
+  }
+
+  /** The mirrored crosshair: only the time is shared, so only the vertical line. */
+  private renderSynced(ctx: CanvasRenderingContext2D, viewport: ViewportState, theme: Theme, slot: number): void {
+    const x = barIndexToX(slot, viewport);
+    const { chartRect } = viewport;
+    if (x < chartRect.x || x > chartRect.x + chartRect.width) return;
+    const looks = crosshairLooks(theme);
+    if (this.magnetMode && slot >= 0 && slot < this.series().length) drawBarTint(ctx, x, viewport, looks.vertical.color);
+    drawVerticalLine(ctx, x, chartRect, looks.vertical);
+  }
+
+  private renderSyncedTimeLabel(
+    ctx: CanvasRenderingContext2D,
+    viewport: ViewportState,
+    theme: Theme,
+    data: DataSeries,
+    slot: number,
+    timeAxisY?: number,
+    timeColumns: readonly TimeColumn[] = [],
+  ): void {
+    const x = barIndexToX(slot, viewport);
+    const { chartRect } = viewport;
+    if (x < chartRect.x || x > chartRect.x + chartRect.width) return;
+    this.drawTimePill(ctx, viewport, theme, data, slot, x, timeAxisY, timeColumns);
+  }
+
+  /**
+   * A bar's time (as `data` holds it) as the pill under the crosshair
+   * writes it: in the chart's time zone, through its time formatter.
+   */
+  formatTime(time: number, data: DataSeries): string {
+    return this.timeText(time, axisTimes(data));
+  }
+
+  private timeText(time: number, times: ReturnType<typeof axisTimes>): string {
+    return this.timeFormatter
+      ? this.timeFormatter(time * barTimeUnit(times), { kind: 'crosshair', timeZone: this.tz })
+      : formatBarTime(time * barTimeUnit(times), this.tz, barsAreDaily(times), this.exchangeZone, this.locale);
+  }
+
+  private drawTimePill(
+    ctx: CanvasRenderingContext2D,
+    viewport: ViewportState,
+    theme: Theme,
+    data: DataSeries,
+    slot: number,
+    x: number,
+    timeAxisY?: number,
+    timeColumns: readonly TimeColumn[] = [],
+  ): void {
+    if (data.length === 0) return;
+    if (!this.timesPastData && (slot < 0 || slot >= data.length)) return;
+    // Renko bricks and the like read the time of the bar they were made from, as the axis labels them.
+    const times = axisTimes(data);
+    // Past either end of the data the time is extrapolated.
+    const time = barIndexToTime(slot, times);
+    const timeText = this.timeText(time, times);
+    const font = `600 ${theme.font.sizeSmall}px ${theme.font.family}`;
+    const axisY = timeAxisY ?? (viewport.chartRect.y + viewport.chartRect.height);
+    ctx.font = font;
+    const half = Math.ceil(ctx.measureText(timeText).width) / 2 + PILL_PAD_X;
+    // The tag stays on the plot: by either edge it stops there, where it would be cut.
+    const { chartRect } = viewport;
+    const at = Math.max(chartRect.x + half, Math.min(chartRect.x + chartRect.width - half, x));
+    clearCoveredColumns(ctx, timeColumns, at - half, at + half, axisY, theme, this.spanTints);
+    drawAxisPill(ctx, {
+      text: timeText,
+      anchorX: at,
+      anchorY: axisY,
+      orientation: 'bottom',
+      bg: crosshairLooks(theme).labelBackground,
+      fg: crosshairLooks(theme).labelText,
+      theme,
+      font,
+    });
+  }
+
+  /** Fire callback outside of render frame via microtask */
+  private scheduleCallback(): void {
+    if (this.callbackScheduled) return;
+    this.callbackScheduled = true;
+    queueMicrotask(() => {
+      this.callbackScheduled = false;
+      this.flushCallback(this.pendingBarIndex, this.pendingPoint);
+    });
+  }
+
+  private flushCallback(barIndex: number | null, point: Point | null): void {
+    this.callback?.(barIndex, point);
+  }
+}
+
+/** The crosshair's dashes when `dashed`. */
+const CROSSHAIR_DASH = [4, 4];
+
+function drawBarTint(ctx: CanvasRenderingContext2D, x: number, viewport: ViewportState, color: string): void {
+  const barUnit = viewport.barWidth + viewport.barSpacing;
+  ctx.fillStyle = color;
+  ctx.globalAlpha = 0.08;
+  ctx.fillRect(x - barUnit / 2, viewport.chartRect.y, barUnit, viewport.chartRect.height);
+  ctx.globalAlpha = 1;
+}
+
+function drawVerticalLine(ctx: CanvasRenderingContext2D, x: number, chartRect: ViewportState['chartRect'], look: ResolvedLineLook): void {
+  if (!look.visible) return;
+  ctx.setLineDash(lineDash(look.style, CROSSHAIR_DASH, look.width));
+  ctx.strokeStyle = look.color;
+  // The wick's own device-pixel column: the line runs through it, not beside it.
+  const column = crispX(ctx, x, look.width);
+  ctx.lineWidth = column.width;
+  ctx.beginPath();
+  ctx.moveTo(column.x, chartRect.y);
+  ctx.lineTo(column.x, chartRect.y + chartRect.height);
+  ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+interface AxisPillOptions {
+  text: string;
+  anchorX: number;
+  anchorY: number;
+  orientation: 'right' | 'bottom';
+  /** A tag on the price axis (`'right'`) is this wide: the axis's width. */
+  axisWidth?: number;
+  bg: string;
+  fg: string;
+  font: string;
+  /** For the tag shape. */
+  theme: Theme;
+}
+
+/**
+ * A tag on an axis. On the price axis it is as every tag there is: the
+ * axis's width from a pixel past its line, its words under the scale's own
+ * labels. On the time axis it is as wide as its words, with a small notch
+ * pointing at the line it names.
+ */
+/** Height (px) of the crosshair's axis pills, and the room each side of their text. */
+const PILL_HEIGHT = 20;
+const PILL_PAD_X = 8;
+
+/** A label's span along the time axis (px). */
+type TimeColumn = { left: number; right: number };
+
+/** Paint the axis's ground over each time label the pill from `left` to `right` would half cover. */
+function clearCoveredColumns(
+  ctx: CanvasRenderingContext2D, columns: readonly TimeColumn[], left: number, right: number, axisY: number, theme: Theme,
+  tints: readonly SpanTint[] = [],
+): void {
+  const covered = columns.filter((c) => c.right > left - 2 && c.left < right + 2);
+  if (covered.length === 0) return;
+  ctx.save();
+  const height = theme.font.sizeSmall + 12;
+  for (const c of covered) {
+    const x = c.left - 2;
+    const width = c.right - c.left + 4;
+    ctx.fillStyle = theme.background;
+    ctx.fillRect(x, axisY + 1, width, height);
+    // A selected drawing's tint over the axis stays under the label taken away.
+    for (const span of tints) {
+      if (span.axis !== 'time') continue;
+      const from = Math.max(x, span.from);
+      const to = Math.min(x + width, span.to);
+      if (to <= from) continue;
+      ctx.fillStyle = span.tint;
+      ctx.fillRect(from, axisY + 1, to - from, height);
+    }
+  }
+  ctx.restore();
+}
+
+/**
+ * Paint the axis's ground over each tick label the price pill at `y` would
+ * half cover, so the pill reads alone instead of over a cut-off number.
+ */
+function clearCoveredRows(
+  ctx: CanvasRenderingContext2D, rows: readonly number[], y: number, axisX: number, axisWidth: number, theme: Theme,
+  tints: readonly SpanTint[] = [],
+): void {
+  const half = Math.ceil(theme.font.sizeSmall / 2) + 1;
+  const covered = rows.filter((row) => Math.abs(row - y) < PILL_HEIGHT / 2 + half);
+  if (covered.length === 0) return;
+  ctx.save();
+  for (const row of covered) {
+    ctx.fillStyle = theme.background;
+    ctx.fillRect(axisX + 1, row - half, axisWidth - 1, half * 2);
+    // A selected drawing's tint over the axis stays under the label taken away.
+    for (const span of tints) {
+      if (span.axis !== 'price') continue;
+      const from = Math.max(row - half, span.from);
+      const to = Math.min(row + half, span.to);
+      if (to <= from) continue;
+      ctx.fillStyle = span.tint;
+      ctx.fillRect(axisX + 1, from, axisWidth - 1, to - from);
+    }
+  }
+  ctx.restore();
+}
+
+function drawAxisPill(ctx: CanvasRenderingContext2D, opts: AxisPillOptions): void {
+  ctx.save();
+  ctx.font = opts.font;
+  const padX = PILL_PAD_X;
+  const notch = 5;
+  const textW = Math.ceil(ctx.measureText(opts.text).width);
+  const w = textW + padX * 2;
+  const h = PILL_HEIGHT;
+  ctx.fillStyle = opts.bg;
+  ctx.textBaseline = 'middle';
+  if (opts.orientation === 'right') {
+    const x = opts.anchorX + 1;
+    const y = opts.anchorY - h / 2;
+    fillTag(ctx, x, y, opts.axisWidth === undefined ? w : opts.axisWidth - 2, h, opts.theme);
+    ctx.fillStyle = opts.fg;
+    ctx.textAlign = 'left';
+    ctx.fillText(opts.text, x + AXIS_TAG_TEXT_INSET, opts.anchorY);
+  } else {
+    const x = opts.anchorX - w / 2;
+    const y = opts.anchorY + notch;
+    fillTag(ctx, x, y, w, h, opts.theme);
+    ctx.beginPath();
+    ctx.moveTo(opts.anchorX, opts.anchorY);
+    ctx.lineTo(opts.anchorX - notch, y + 1);
+    ctx.lineTo(opts.anchorX + notch, y + 1);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = opts.fg;
+    ctx.textAlign = 'center';
+    ctx.fillText(opts.text, opts.anchorX, y + h / 2);
+  }
+  ctx.restore();
+}
+
+/** `ms` is in milliseconds: the caller knows its series' unit. */
+function formatBarTime(ms: number, tz: TimeZoneSetting, daily?: boolean, exchangeZone?: string | null, locale = 'en-US'): string {
+  // Same rule as TimeAxis's own label: a daily-or-larger bar has no time-of-day to show, so the
+  // year takes that space instead: a day and a month alone are ambiguous once bars span years apart.
+  // Its date is the one it stands for, in any zone shown.
+  if (daily) {
+    const date = barDateParts(ms, tz, exchangeZone);
+    return writtenDate(locale, date.year, date.month, date.day, true);
+  }
+  const parts = timeParts(ms, tz);
+  const { year, month: m, day, hours: h, minutes: mm } = parts;
+  if (daily === undefined && isDateOnly(parts)) return writtenDate(locale, year, m, day, true);
+  return `${writtenDate(locale, year, m, day, false)} ${h < 10 ? '0' + h : h}:${mm < 10 ? '0' + mm : mm}`;
+}

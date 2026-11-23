@@ -1,0 +1,286 @@
+// @vitest-environment jsdom
+import { describe, beforeAll, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { preloadDialogs } from '../widgetDialogs.js';
+import { DARK_THEME, LIGHT_THEME, MODERN_DARK_THEME, MODERN_LIGHT_THEME, type ChartOptions, type Theme } from '@1penny/commons';
+
+type Step = { undo: () => void; redo: () => void; subject?: string };
+
+/** Stand-in for the canvas-backed Chart: keeps the user's overrides and records the theme calls. */
+class FakeChart {
+  static last: FakeChart;
+  steps: Step[] = [];
+  themes: unknown[] = [];
+  user: Record<string, unknown> = {};
+  overrideCalls: [Record<string, unknown>, unknown][] = [];
+  resets: [unknown, unknown][] = [];
+  chartType = 'candlestick';
+  constructor(_host: HTMLElement, public options: ChartOptions) {
+    FakeChart.last = this;
+    return new Proxy(this, {
+      get: (target, key, receiver) => {
+        if (key in target) return Reflect.get(target, key, receiver);
+        return () => {};
+      },
+    });
+  }
+  on(): void {}
+  recordUndo(step: Step): void { this.steps.push(step); }
+  setChartType(type: string): void { this.chartType = type; }
+  themeName = 'dark';
+  setTheme(theme: unknown): void { this.themes.push(theme); }
+  watermarks: { color?: string }[] = [];
+  setWatermark(_text: string, opts: { color?: string }): void { this.watermarks.push(opts); }
+  getTheme(): Theme { return { ...DARK_THEME, name: this.themeName }; }
+  applyOverrides(patch: Record<string, unknown>, options: unknown): void {
+    this.overrideCalls.push([patch, options]);
+    for (const [k, v] of Object.entries(patch)) {
+      if (v === null) delete this.user[k];
+      else this.user[k] = v;
+    }
+  }
+  getOverrides(): Record<string, unknown> { return { ...this.user }; }
+  resetOverrides(keys: string[], options: unknown): void {
+    this.resets.push([keys, options]);
+    for (const k of keys) delete this.user[k];
+  }
+  getStyleValue(key: string): unknown { return this.user[key] ?? `theme:${key}`; }
+  isAutoScale(): boolean { return true; }
+  isInvertScale(): boolean { return false; }
+  getData(): unknown[] { return []; }
+  getDrawings(): unknown[] { return []; }
+  getIndicatorPanes(): unknown[] { return []; }
+  getActiveIndicators(): unknown[] { return []; }
+  getPlotRect() { return { x: 0, y: 0, width: 600, height: 300 }; }
+  getLegendBottom(): number { return 40; }
+  isTimeAligned(): boolean { return true; }
+  isTimeframeAllowed(): boolean { return true; }
+  getOrders(): unknown[] { return []; }
+  getPositions(): unknown[] { return []; }
+  getFills(): unknown[] { return []; }
+  getRequiredSymbols(): string[] { return []; }
+  getSymbolInfo(): null { return null; }
+  formatPrice(v: number): string { return v.toFixed(2); }
+}
+
+vi.mock('../../Chart.js', () => ({ Chart: FakeChart }));
+
+const { ChartWidget } = await import('../ChartWidget.js');
+
+type Internals = {
+  handleToggleTheme(): void;
+  chartSettings: {
+    openSettings(): void;
+    changeSettings(patch: Record<string, unknown>): void;
+    changeStyle(patch: Record<string, unknown>): void;
+    resetSettings(): void;
+    settingsState: Record<string, unknown>;
+  };
+};
+
+let host: HTMLDivElement;
+let widget: InstanceType<typeof ChartWidget>;
+const inner = () => widget as unknown as Internals;
+
+function make(options: ConstructorParameters<typeof ChartWidget>[1] = {}) {
+  widget = new ChartWidget(host, { symbol: 'AAA', symbols: ['AAA'], ...options });
+}
+
+beforeEach(() => {
+  localStorage.clear();
+  host = document.createElement('div');
+  document.body.appendChild(host);
+});
+
+afterEach(() => {
+  widget.destroy();
+  document.querySelectorAll('.pcw-portal').forEach((p) => p.remove());
+  host.remove();
+});
+
+// The dialogs load their code when first opened; here it is in up front, so each opens at once.
+beforeAll(preloadDialogs);
+
+describe('ChartWidget colours of its look', () => {
+  it('draws the chart in Modern’s colours by default, dark and light', () => {
+    make();
+    expect(FakeChart.last.options.theme).toEqual(MODERN_DARK_THEME);
+    inner().handleToggleTheme();
+    expect(FakeChart.last.themes.at(-1)).toEqual(MODERN_LIGHT_THEME);
+    widget.destroy();
+    make({ theme: 'light' });
+    expect(FakeChart.last.options.theme).toEqual(MODERN_LIGHT_THEME);
+  });
+
+  it('keeps the colours before it with another look', () => {
+    make({ ui: 'print' });
+    expect(FakeChart.last.options.theme).toEqual(DARK_THEME);
+    inner().handleToggleTheme();
+    expect(FakeChart.last.themes.at(-1)).toEqual(LIGHT_THEME);
+  });
+
+  it('takes the chart to the colours of a look set later, but leaves a theme of the host’s', () => {
+    make();
+    widget.setUI('print');
+    expect(FakeChart.last.themes.at(-1)).toEqual(DARK_THEME);
+    widget.setUI({ preset: 'modern', density: 'compact' });
+    expect(FakeChart.last.themes.at(-1)).toEqual(MODERN_DARK_THEME);
+    const brand: Theme = { ...DARK_THEME, name: 'brand', background: '#101820' };
+    widget.setTheme(brand);
+    const calls = FakeChart.last.themes.length;
+    widget.setUI('print');
+    expect(FakeChart.last.themes.length).toBe(calls);
+  });
+
+  it('takes a light chart to the colours of a look set later, and a mode named after a host theme to the look’s', () => {
+    make({ theme: 'light' });
+    widget.setUI('print');
+    expect(FakeChart.last.themes.at(-1)).toEqual(LIGHT_THEME);
+    widget.setUI('modern');
+    expect(FakeChart.last.themes.at(-1)).toEqual(MODERN_LIGHT_THEME);
+    widget.setTheme({ ...LIGHT_THEME, name: 'brand' });
+    widget.setTheme('light');
+    expect(FakeChart.last.themes.at(-1)).toEqual(MODERN_LIGHT_THEME);
+  });
+
+  it('draws candles in the market colours and the ground of the editor', () => {
+    expect([MODERN_DARK_THEME.candleUp, MODERN_DARK_THEME.candleDown]).toEqual(['#089981', '#f23645']);
+    expect([MODERN_LIGHT_THEME.candleUp, MODERN_LIGHT_THEME.candleDown]).toEqual(['#089981', '#f23645']);
+    expect([MODERN_DARK_THEME.background, MODERN_DARK_THEME.grid]).toEqual(['#1f1f1f', '#262626']);
+    expect([MODERN_LIGHT_THEME.background, MODERN_LIGHT_THEME.grid]).toEqual(['#ffffff', '#f0f0f0']);
+    // The dark and light of their look: the user's colours are kept by these names.
+    expect([MODERN_DARK_THEME.name, MODERN_LIGHT_THEME.name]).toEqual(['dark', 'light']);
+  });
+});
+
+describe('ChartWidget colours in the settings', () => {
+  it("puts the look picked in the settings among the user's overrides, not into the theme", () => {
+    make();
+    inner().chartSettings.changeStyle({ 'series.heikinAshi.upColor': '#00ff00', 'grid.horizontal.width': 2, 'trading.buyColor': '#0000ff' });
+    expect(FakeChart.last.overrideCalls).toEqual([[{
+      'series.heikinAshi.upColor': '#00ff00',
+      'grid.horizontal.width': 2,
+      'trading.buyColor': '#0000ff',
+    }, { layer: 'user' }]]);
+    expect(FakeChart.last.themes).toEqual([]);
+  });
+
+  it('undoes a colour back to no override at all, not to the colour it resolved to', () => {
+    make();
+    inner().chartSettings.changeStyle({ 'series.candlestick.upColor': '#00ff00' });
+    FakeChart.last.steps.at(-1)!.undo();
+    expect(FakeChart.last.user).toEqual({});
+    FakeChart.last.steps.at(-1)!.redo();
+    expect(FakeChart.last.user).toEqual({ 'series.candlestick.upColor': '#00ff00' });
+  });
+
+  it('undoes only the keys it changed, leaving what the host set on the user’s layer since', () => {
+    make();
+    inner().chartSettings.changeStyle({ 'background.color': '#010101' });
+    widget.getChart().applyOverrides({ 'grid.horizontal.color': '#222222' }, { layer: 'user' });
+    FakeChart.last.steps.at(-1)!.undo();
+    expect(FakeChart.last.user).toEqual({ 'grid.horizontal.color': '#222222' });
+  });
+
+  it('takes a key back to the part’s own with null, as one more step', () => {
+    make();
+    inner().chartSettings.changeStyle({ 'markers.longColor': '#00ff00' });
+    inner().chartSettings.changeStyle({ 'markers.longColor': null });
+    expect(FakeChart.last.user).toEqual({});
+    FakeChart.last.steps.at(-1)!.undo();
+    expect(FakeChart.last.user).toEqual({ 'markers.longColor': '#00ff00' });
+  });
+
+  it('makes a colour dragged across the picker one step', () => {
+    make();
+    inner().chartSettings.changeStyle({ 'background.color': '#010101' });
+    inner().chartSettings.changeStyle({ 'background.color': '#020202' });
+    const [a, b] = FakeChart.last.steps.slice(-2);
+    expect(a.subject).toBeDefined();
+    expect(a.subject).toBe(b.subject);
+  });
+
+  it('leaves the colours of another theme alone on an undo', () => {
+    make();
+    inner().chartSettings.changeStyle({ 'background.color': '#010101' });
+    FakeChart.last.themeName = 'light';
+    const calls = FakeChart.last.overrideCalls.length;
+    FakeChart.last.steps.at(-1)!.undo();
+    expect(FakeChart.last.overrideCalls).toHaveLength(calls);
+  });
+
+  it("shows the chart's look when the settings open", () => {
+    make();
+    FakeChart.last.user['series.candlestick.upColor'] = '#123456';
+    inner().chartSettings.openSettings();
+    const up = document.querySelector<HTMLInputElement>('.pcw-modal input[aria-label="Up body"]')!;
+    expect(up.closest('.pcw-settings-row')!.querySelector('.pcw-color-hex')!.textContent).toBe('#123456');
+  });
+
+  it("resets the look to the theme's, whatever theme it is, every chart type's too", () => {
+    make({ theme: 'light' });
+    inner().chartSettings.changeStyle({ 'background.color': '#010101', 'series.kagi.upColor': '#00ff00', 'tradeZones.activeColor': '#0000ff' });
+    inner().chartSettings.resetSettings();
+    const [keys, options] = FakeChart.last.resets.at(-1)!;
+    expect(keys).toEqual(expect.arrayContaining([
+      'background.color', 'series.candlestick.upColor', 'series.kagi.upColor', 'grid.vertical.width',
+      'trading.buyColor', 'markers.neutralColor', 'tradeZones.activeColor', 'drawings.handleColor', 'sessionBreaks.style',
+    ]));
+    expect(options).toEqual({ layer: 'user' });
+    // No dark colours forced onto a light chart.
+    expect(FakeChart.last.user).toEqual({});
+    expect(FakeChart.last.themes).toEqual([]);
+    FakeChart.last.steps.at(-1)!.undo();
+    expect(FakeChart.last.user).toEqual({ 'background.color': '#010101', 'series.kagi.upColor': '#00ff00', 'tradeZones.activeColor': '#0000ff' });
+  });
+
+  it('takes the look that is not a colour to the other theme, and leaves the colours with theirs', () => {
+    make();
+    const chart = FakeChart.last;
+    const buckets = new Map<string, Record<string, unknown>>([['dark', chart.user]]);
+    chart.setTheme = (theme: unknown) => {
+      chart.themes.push(theme);
+      const name = (theme as Theme).name;
+      chart.themeName = name;
+      if (!buckets.has(name)) buckets.set(name, {});
+      chart.user = buckets.get(name)!;
+    };
+    inner().chartSettings.changeStyle({
+      'grid.vertical.visible': false,
+      'crosshair.horizontal.style': 'dotted',
+      'series.line.lineWidth': 3,
+      'crosshair.horizontal.color': '#123456',
+    });
+    inner().handleToggleTheme();
+    expect(chart.user).toEqual({ 'grid.vertical.visible': false, 'crosshair.horizontal.style': 'dotted', 'series.line.lineWidth': 3 });
+    expect(buckets.get('dark')!['crosshair.horizontal.color']).toBe('#123456');
+  });
+
+  it("brings back the host's own theme when toggled back to it", () => {
+    const brand: Theme = { ...LIGHT_THEME, name: 'brand', background: '#fdfaf3' };
+    make({ theme: brand });
+    inner().handleToggleTheme();
+    expect(FakeChart.last.themes.at(-1)).toEqual(MODERN_DARK_THEME);
+    inner().handleToggleTheme();
+    expect(FakeChart.last.themes.at(-1)).toEqual(brand);
+  });
+
+  it('gives the watermark the ink of a theme set later, as the toggle does', () => {
+    make();
+    widget.setTheme('light');
+    expect(FakeChart.last.watermarks.at(-1)?.color).toBe('rgba(0,0,0,0.03)');
+    expect(host.querySelector<HTMLElement>('[data-pcw-theme]')?.dataset.pcwTheme).toBe('light');
+    expect(document.querySelector<HTMLElement>('.pcw-portal')?.dataset.pcwTheme).toBe('light');
+    widget.setTheme('dark');
+    expect(FakeChart.last.watermarks.at(-1)?.color).toBe('rgba(255,255,255,0.03)');
+  });
+
+  it('remembers a theme set later for its mode', () => {
+    make();
+    const night: Theme = { ...DARK_THEME, name: 'night', background: '#000000' };
+    widget.setTheme(night);
+    inner().handleToggleTheme();
+    expect(FakeChart.last.themes.at(-1)).toEqual(MODERN_LIGHT_THEME);
+    inner().handleToggleTheme();
+    expect(FakeChart.last.themes.at(-1)).toEqual(night);
+  });
+});

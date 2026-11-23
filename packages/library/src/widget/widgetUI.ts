@@ -1,0 +1,684 @@
+/**
+ * The widget's look: corners, sizes, type, lines, shadows and the shape of
+ * its bars, as tokens. A preset gives all of them; a theme of yours changes
+ * what it names. Colours stay with the widget's dark / light theme, but for
+ * Modern's: it brings a dark and a light of its own (see `WidgetStyles.css`
+ * and `MODERN_DARK_THEME`).
+ */
+import { FIGURES_FONT_FAMILY, PHI, SANS_FONT_FAMILY, evenPx, phiStep } from '@1penny/commons';
+
+export type WidgetUIPreset = 'modern' | 'print' | 'studio' | 'terminal' | 'capsule' | 'desk';
+
+const DEFAULT_PRESET: WidgetUIPreset = 'modern';
+
+/** Type climbs by the cube root of φ: every third size is φ larger (11, 13, 15, 18, 21). */
+const TYPE_STEPS_PER_PHI = 3;
+/** Below this, letters with two marks stacked (Vietnamese ế, ộ) stop reading. */
+const MIN_TYPE_SIZE = 10;
+
+/**
+ * How much bigger the look grows on a wide widget, by its width in CSS px:
+ * a sixth of φ from full HD, a third from 2560 (4K at 150%), a half from
+ * 3400 (4K at 100%). Narrower than the first, it keeps its sizes.
+ */
+const WIDE_STEPS: readonly (readonly [minWidth: number, phiFraction: number])[] = [
+  [3400, 1 / 2],
+  [2560, 1 / 3],
+  [1800, 1 / 6],
+];
+/**
+ * The drawing tools are a half step of φ over the look's other buttons and
+ * icons: drawn on all day and alone in their column, they read at a glance.
+ * Compact keeps them at the others' size.
+ */
+const TOOL_STEP = Math.sqrt(PHI);
+/**
+ * The room either side of a drawing tool in its column, px, at the least: the
+ * column is its buttons and little more, so big icons cost the chart no width.
+ */
+const TOOL_SIDE_ROOM = 3;
+/** A line of text over its type size, before any rounding. */
+const LINE_RATIO = 1.4;
+/**
+ * Spacing, px, `--1p-space-1` to `-7`. Fibonacci numbers on a 4 px grid (1, 2,
+ * 3, 5, 8 times 4), with 2 and 6, the halves of 4 and 12, under them: every
+ * step even, so what a gap or a padding centres lands on a whole pixel. From
+ * 8 up neighbours stand at 1.5, 1.67 and 1.6, near φ; the small steps (2, 4,
+ * 6, 8) climb by 2 px instead, where a ratio of φ has no even numbers to land
+ * on. The classic and compact densities keep the plain Fibonacci numbers.
+ */
+const SPACE_EVEN = [2, 4, 6, 8, 12, 20, 32] as const;
+const SPACE_FIBONACCI = [2, 3, 5, 8, 13, 21, 34] as const;
+/**
+ * The room inside a control beside its label, a bar beside its first button
+ * and a menu row beside its text: a step up the spacing ladder from the
+ * classic 8 px.
+ */
+const CONTROL_PAD = { even: SPACE_EVEN[4], classic: SPACE_FIBONACCI[3] } as const;
+/** A box as wide as its content, rounded up to a whole pixel. */
+const TEXT_WIDTH_ROUNDED = 'calc-size(max-content, round(up, size, 1px))';
+/** An on-chart indicator row's line, on the plot and in a pane, px. */
+const LEGEND_LINE = { even: [20, 16], classic: [19, 15] } as const;
+
+/**
+ * Whether a density is laid out on even pixels. Classic and compact are the
+ * look as it was before 2.0, odd sizes and all.
+ */
+function isEvenDensity(density: WidgetUIDensity | undefined): boolean {
+  return density !== 'classic' && density !== 'compact';
+}
+/** The icon lines a theme may set, CSS px (0: as drawn). */
+const MIN_ICON_STROKE = 0.5;
+const MAX_ICON_STROKE = 3;
+/** The scales a theme may set by hand. */
+const MIN_SCALE = 0.75;
+const MAX_SCALE = 2;
+
+/** The look's scale for a widget `width` px wide (see `WidgetUITheme.scale`): 1 below full HD. */
+export function widgetScaleFor(width: number): number {
+  const step = WIDE_STEPS.find(([min]) => width >= min);
+  return step ? PHI ** step[1] : 1;
+}
+
+/**
+ * The look at `factor` its size: bars, buttons, icons, menu rows and type,
+ * each rounded to a whole pixel, the sizes to an even one (but in the classic
+ * and compact densities). Corners, lines and shadows stay.
+ */
+export function scaledWidgetUI(ui: ResolvedWidgetUI, factor: number): ResolvedWidgetUI {
+  if (factor === 1) return ui;
+  const s = ui.sizes;
+  const even = isEvenDensity(ui.density);
+  const at = (n: number) => (even ? evenPx(n * factor) : Math.round(n * factor));
+  return {
+    ...ui,
+    sizes: { toolbar: at(s.toolbar), control: at(s.control), controlSmall: at(s.controlSmall), icon: at(s.icon), sidebar: at(s.sidebar), menuItem: at(s.menuItem) },
+    font: { ...ui.font, size: Math.round(ui.font.size * factor) },
+  };
+}
+
+/** The type size `steps` from `body` on the look's scale, never below 10px. */
+export function typeSize(body: number, steps: number): number {
+  return Math.max(MIN_TYPE_SIZE, phiStep(body, steps, TYPE_STEPS_PER_PHI));
+}
+
+/** Corners, in px (999 makes a pill). */
+export interface WidgetUIRadius {
+  xs: number;
+  sm: number;
+  md: number;
+  lg: number;
+  xl: number;
+}
+
+/** Each part's corners, in px; unset parts follow the scale. */
+export interface WidgetUIComponentRadius {
+  /** Buttons and toggles in bars. */
+  control: number;
+  /** Text fields and selects. */
+  input: number;
+  /** Menus and dropdowns. */
+  menu: number;
+  /** Dialogs. */
+  dialog: number;
+  /** Floating panels (alerts, data window, order ticket). */
+  panel: number;
+  tooltip: number;
+  /** Price tags and chips. */
+  tag: number;
+  toast: number;
+  /** The toolbar's own box (a floating toolbar is an island). */
+  toolbar: number;
+  /** The drawing tools' own box. */
+  sidebar: number;
+}
+
+/** Sizes, in px. */
+export interface WidgetUISizes {
+  toolbar: number;
+  control: number;
+  controlSmall: number;
+  icon: number;
+  /**
+   * The drawing tools' column. Its buttons are a half step of φ over `control`
+   * and their icons over `icon` (but in compact), and never wider than the
+   * column less 6 px a side.
+   */
+  sidebar: number;
+  menuItem: number;
+}
+
+export interface WidgetUIFont {
+  /** A CSS font-family list. The widget loads no fonts: load the ones you name. */
+  family: string;
+  /** For prices and numbers. */
+  mono: string;
+  /** Body size, px; the small sizes follow it. */
+  size: number;
+  weight: number;
+  strongWeight: number;
+  /** Small labels (section titles, field names): as written or in capitals. */
+  labelCase: 'none' | 'uppercase';
+  /** Their letter spacing, in em. */
+  labelTracking: number;
+}
+
+export interface WidgetUIShadows {
+  menu: string;
+  dialog: string;
+  tooltip: string;
+}
+
+/**
+ * How roomy the look is: its controls' sizes, the spacing between them, and
+ * the room the chart leaves around its bars.
+ *
+ * - `'comfortable'` (the default): every size and gap an even number of
+ *   pixels, a step more padding in controls, and a comfortable chart (see
+ *   `ChartDensity`).
+ * - `'classic'`: the widget as it was before 2.0: the sizes and Fibonacci
+ *   spacing of 1.x, golden bars, the chart's compact margins.
+ * - `'compact'`: smaller controls on the 1.x spacing, the chart compact with
+ *   the classic 2 px gap between bars. Unchanged from 1.x.
+ * - `'spacious'`: bigger controls. `'airy'`: spacious, with the figures
+ *   (legend, axes) in the look's sans face too.
+ *
+ * `chartOptions.density`, `chartOptions.barLayout` and a
+ * `chartOptions.font.family` win over it, and sizes alone in
+ * `chartOptions.font` keep the look's face.
+ */
+export type WidgetUIDensity = 'compact' | 'classic' | 'comfortable' | 'spacious' | 'airy';
+
+/** The whole look, every token set. */
+export interface ResolvedWidgetUI {
+  preset: WidgetUIPreset;
+  /** Always set by `resolveWidgetUI`; `'comfortable'` when left out. */
+  density?: WidgetUIDensity;
+  radius: WidgetUIRadius;
+  components: WidgetUIComponentRadius;
+  sizes: WidgetUISizes;
+  font: WidgetUIFont;
+  borders: { width: number; separators: boolean };
+  shadows: WidgetUIShadows;
+  /** Frosted floating surfaces: blur behind them, px (0: solid). */
+  blur: number;
+  /** How a chosen button shows: a tinted fill, a solid pill, or an underline. */
+  active: 'tint' | 'solid' | 'underline';
+  /** The toolbar along the top edge, or floating as an island. */
+  toolbar: 'docked' | 'floating';
+  /** The drawing tools along the left edge, or floating. */
+  sidebar: 'docked' | 'floating';
+  /** The interval buttons as they are, or in a segmented track. */
+  intervals: 'plain' | 'segmented';
+  /** Corners of the price tags and pills the chart draws (999: pills). */
+  tagRadius: number;
+  /**
+   * The icons' lines, in CSS px at every icon size (0: as drawn, 1.75 of the
+   * icon's 24 units, so thicker as the icon grows). Always set by `resolveWidgetUI`; 0 when left out.
+   */
+  iconStroke?: number;
+  /** How much bigger than its sizes the look is drawn: `'auto'` by the widget's width, or a number. */
+  scale?: number | 'auto';
+}
+
+/** Your look: a preset to start from (Modern by default) and what to change. */
+export interface WidgetUITheme {
+  preset?: WidgetUIPreset;
+  radius?: Partial<WidgetUIRadius>;
+  components?: Partial<WidgetUIComponentRadius>;
+  /**
+   * Control sizes, spacing and the chart's room at once: compact, comfortable
+   * (the preset's) or spacious; `sizes` win over it. `'classic'` is the widget
+   * as it was before 2.0. `'airy'`: spacious, with the chart's figures in the
+   * sans face. Compact also keeps the chart's classic bars (see `WidgetUIDensity`).
+   */
+  density?: WidgetUIDensity;
+  sizes?: Partial<WidgetUISizes>;
+  font?: Partial<WidgetUIFont>;
+  borders?: Partial<ResolvedWidgetUI['borders']>;
+  shadows?: Partial<WidgetUIShadows>;
+  blur?: number;
+  active?: ResolvedWidgetUI['active'];
+  toolbar?: ResolvedWidgetUI['toolbar'];
+  sidebar?: ResolvedWidgetUI['sidebar'];
+  intervals?: ResolvedWidgetUI['intervals'];
+  tagRadius?: number;
+  /** The icons' lines, CSS px from 0.5 to 3, the same at every icon size; 0 draws them as the icon set does. */
+  iconStroke?: number;
+  /**
+   * How much bigger the bars, buttons, icons and type are drawn. `'auto'`
+   * (the default) by the widget's width: as set up to full HD, then a step
+   * of φ's root bigger at a time, so a 4K screen is not all small print. A
+   * number (0.75 to 2) at every width; 1 keeps the sizes as they are.
+   */
+  scale?: number | 'auto';
+}
+
+const SYSTEM_SANS = "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif";
+const MONO = "'JetBrains Mono', 'SF Mono', 'Cascadia Code', 'Fira Code', 'Consolas', ui-monospace, monospace";
+/**
+ * Print's face: each system's own, with nothing to load. On Windows 11 that is
+ * Segoe UI Variable, lighter than Segoe UI at the same size and with a true
+ * medium weight; older Windows keeps Segoe UI.
+ */
+const PRINT_SANS = SANS_FONT_FAMILY.replace("'Segoe UI'", "'Segoe UI Variable Text', 'Segoe UI'");
+/** Print's figures, on the chart and in the panels: the face a chart of one's own draws its figures in too. */
+const PRINT_FIGURES = FIGURES_FONT_FAMILY;
+/**
+ * The desktop trading platforms' small Windows face, and the nearest where
+ * there is no Tahoma. Its digits are one width, so figures still line up.
+ */
+const DESK_SANS = "Tahoma, Verdana, 'Segoe UI', 'DejaVu Sans', sans-serif";
+/**
+ * Modern's face: Geist where the page loads it (the widget loads no fonts),
+ * and each system's own where it doesn't, as Print's.
+ */
+const MODERN_SANS = `'Geist', ${PRINT_SANS}`;
+
+type Density = 'compact' | 'spacious';
+type PresetBase = Omit<ResolvedWidgetUI, 'components' | 'preset' | 'density'> & {
+  components: Partial<WidgetUIComponentRadius>;
+  /** Its sizes when compact or spacious; the shared table when it has none. */
+  density?: Record<Density, WidgetUISizes>;
+  /** What its sizes were before 2.0, where they differ: the classic density's. */
+  classic?: Partial<WidgetUISizes>;
+};
+
+const PRESETS: Record<WidgetUIPreset, PresetBase> = {
+  /*
+   * Modern, the default: a code editor's window. Chrome a shade off the chart
+   * around it, hairlines between, 16 px icons in 28 px buttons on a 38 px bar,
+   * corners of 4 on controls, 6 on menus and floating panels and 8 on dialogs.
+   * A chosen tool shows the editor's toggled ground; its own dark and light
+   * colours are in the stylesheet, scoped to it.
+   */
+  modern: {
+    radius: { xs: 2, sm: 3, md: 4, lg: 6, xl: 8 },
+    components: { tag: 2, tooltip: 4, toolbar: 0, sidebar: 0 },
+    sizes: { toolbar: 38, control: 28, controlSmall: 22, icon: 16, sidebar: 44, menuItem: 26 },
+    density: {
+      compact: { toolbar: 32, control: 24, controlSmall: 20, icon: 16, sidebar: 32, menuItem: 24 },
+      spacious: { toolbar: 46, control: 34, controlSmall: 28, icon: 20, sidebar: 52, menuItem: 32 },
+    },
+    font: { family: MODERN_SANS, mono: PRINT_FIGURES, size: 13, weight: 400, strongWeight: 600, labelCase: 'none', labelTracking: 0 },
+    borders: { width: 1, separators: true },
+    // A line round each floating surface, and the editor's soft shadow.
+    shadows: {
+      menu: '0 0 0 1px var(--1p-border-strong), var(--1p-shadow-md)',
+      dialog: '0 0 0 1px var(--1p-border), var(--1p-shadow-lg)',
+      tooltip: 'var(--1p-shadow-sm)',
+    },
+    blur: 0,
+    active: 'tint',
+    toolbar: 'docked',
+    sidebar: 'docked',
+    intervals: 'plain',
+    tagRadius: 2,
+    iconStroke: 1.5,
+  },
+  /*
+   * Print, the default before Modern: paper and ink, hairlines, figures that line up. It
+   * keeps to the golden ratio. Sizes climb in half steps of φ from the icon
+   * (20, 26, 34, 42), each the even number nearest its step so an icon centres
+   * on whole pixels in its button and a button in its bar. The one that departs
+   * is the button: the step is 32.9, whose nearest even number is 32, and 34 is
+   * taken, to stay the size the 33 of 1.x read as and leave a 20 px icon 7 px a
+   * side. The drawing tools' column is 42, their buttons and no more, a menu
+   * row as tall as a button; corners are Fibonacci numbers, and a nested
+   * corner is the one around it less the padding between (a menu's 5 = its
+   * rows' 2 + its 3 of padding). Large icons in fine lines, labels as written,
+   * a medium weight for emphasis, and surfaces lifted by a shadow more than
+   * outlined keep it light to look at all day.
+   */
+  print: {
+    radius: { xs: 1, sm: 2, md: 3, lg: 5, xl: 8 },
+    components: { tag: 2, toolbar: 0, sidebar: 0 },
+    sizes: { toolbar: 42, control: 34, controlSmall: 26, icon: 20, sidebar: 42, menuItem: 34 },
+    classic: { control: 33, menuItem: 33 },
+    // A half step of φ down or up; spacious to the even numbers (53.3 and 59 are 54 and 60).
+    density: {
+      compact: { toolbar: 33, control: 26, controlSmall: 20, icon: 16, sidebar: 32, menuItem: 26 },
+      spacious: { toolbar: 54, control: 42, controlSmall: 34, icon: 26, sidebar: 60, menuItem: 42 },
+    },
+    font: { family: PRINT_SANS, mono: PRINT_FIGURES, size: 13, weight: 400, strongWeight: 500, labelCase: 'none', labelTracking: 0 },
+    borders: { width: 1, separators: true },
+    // A faint line round each surface, and a soft shadow to lift it off the chart.
+    shadows: {
+      menu: '0 0 0 1px var(--1p-divider), var(--1p-shadow-lg)',
+      dialog: '0 0 0 1px var(--1p-divider), var(--1p-shadow-lg)',
+      tooltip: 'var(--1p-shadow-sm)',
+    },
+    blur: 0,
+    active: 'solid',
+    toolbar: 'docked',
+    sidebar: 'docked',
+    intervals: 'plain',
+    tagRadius: 2,
+    iconStroke: 1,
+  },
+  studio: {
+    radius: { xs: 3, sm: 5, md: 7, lg: 11, xl: 16 },
+    components: { toolbar: 0, sidebar: 0 },
+    sizes: { toolbar: 46, control: 30, controlSmall: 24, icon: 18, sidebar: 44, menuItem: 30 },
+    font: { family: `'Manrope', 'Inter', ${SYSTEM_SANS}`, mono: MONO, size: 13, weight: 500, strongWeight: 600, labelCase: 'none', labelTracking: 0 },
+    borders: { width: 1, separators: false },
+    // Shadows from the theme's tokens, so they suit dark and light alike.
+    shadows: { menu: 'var(--1p-shadow-lg)', dialog: 'var(--1p-shadow-xl)', tooltip: 'var(--1p-shadow-md)' },
+    blur: 0,
+    active: 'tint',
+    toolbar: 'docked',
+    sidebar: 'docked',
+    intervals: 'segmented',
+    tagRadius: 4,
+    iconStroke: 0,
+  },
+  terminal: {
+    radius: { xs: 1, sm: 2, md: 2, lg: 2, xl: 3 },
+    components: { tag: 0, toolbar: 0, sidebar: 0 },
+    sizes: { toolbar: 36, control: 26, controlSmall: 20, icon: 16, sidebar: 40, menuItem: 26 },
+    classic: { sidebar: 39 },
+    font: {
+      family: `'IBM Plex Sans Condensed', 'Roboto Condensed', 'Arial Narrow', ${SYSTEM_SANS}`,
+      mono: "'IBM Plex Mono', ui-monospace, monospace",
+      size: 12, weight: 500, strongWeight: 600, labelCase: 'uppercase', labelTracking: 0.08,
+    },
+    borders: { width: 1, separators: true },
+    shadows: {
+      menu: '0 0 0 1px var(--1p-border-strong)',
+      dialog: '0 0 0 1px var(--1p-border-strong), var(--1p-shadow-lg)',
+      tooltip: 'none',
+    },
+    blur: 0,
+    active: 'underline',
+    toolbar: 'docked',
+    sidebar: 'docked',
+    intervals: 'plain',
+    tagRadius: 0,
+    iconStroke: 0,
+  },
+  capsule: {
+    radius: { xs: 6, sm: 10, md: 999, lg: 18, xl: 24 },
+    components: { tooltip: 10, toolbar: 999, sidebar: 999, toast: 999, tag: 999 },
+    sizes: { toolbar: 44, control: 32, controlSmall: 26, icon: 18, sidebar: 48, menuItem: 34 },
+    classic: { sidebar: 47 },
+    font: { family: `'Sora', 'Manrope', ${SYSTEM_SANS}`, mono: MONO, size: 13, weight: 500, strongWeight: 600, labelCase: 'none', labelTracking: 0 },
+    borders: { width: 1, separators: false },
+    shadows: {
+      menu: '0 0 0 1px var(--1p-divider), var(--1p-shadow-xl)',
+      dialog: '0 0 0 1px var(--1p-divider), var(--1p-shadow-xl)',
+      tooltip: 'var(--1p-shadow-lg)',
+    },
+    blur: 16,
+    active: 'solid',
+    toolbar: 'floating',
+    sidebar: 'floating',
+    intervals: 'segmented',
+    tagRadius: 999,
+    iconStroke: 0,
+  },
+  /*
+   * Desk: a desktop trading platform's window. Tahoma at 12px throughout,
+   * square corners, bars a step tighter, and buttons that show a tint.
+   */
+  desk: {
+    radius: { xs: 0, sm: 1, md: 2, lg: 2, xl: 3 },
+    components: { tag: 0, toolbar: 0, sidebar: 0 },
+    sizes: { toolbar: 34, control: 24, controlSmall: 20, icon: 16, sidebar: 38, menuItem: 24 },
+    classic: { sidebar: 37 },
+    font: { family: DESK_SANS, mono: DESK_SANS, size: 12, weight: 400, strongWeight: 700, labelCase: 'none', labelTracking: 0 },
+    borders: { width: 1, separators: true },
+    shadows: {
+      menu: '0 0 0 1px var(--1p-border-strong), var(--1p-shadow-sm)',
+      dialog: '0 0 0 1px var(--1p-border-strong), var(--1p-shadow-md)',
+      tooltip: '0 0 0 1px var(--1p-border)',
+    },
+    blur: 0,
+    active: 'tint',
+    toolbar: 'docked',
+    sidebar: 'docked',
+    intervals: 'plain',
+    tagRadius: 0,
+    iconStroke: 0,
+  },
+};
+
+/** Compact and spacious sizes for the looks without their own. */
+const DENSITY: Record<Density, WidgetUISizes> = {
+  compact: { toolbar: 38, control: 26, controlSmall: 20, icon: 16, sidebar: 32, menuItem: 26 },
+  spacious: { toolbar: 52, control: 34, controlSmall: 28, icon: 20, sidebar: 50, menuItem: 34 },
+};
+
+/** A preset's sizes at a density. */
+function densitySizes(base: PresetBase, density: WidgetUIDensity): WidgetUISizes {
+  if (density === 'classic') return { ...base.sizes, ...base.classic };
+  if (density === 'compact') return (base.density ?? DENSITY).compact;
+  if (density === 'spacious' || density === 'airy') return (base.density ?? DENSITY).spacious;
+  return base.sizes;
+}
+
+/** Each part's corners from the scale (where the preset sets none of its own). */
+function componentsFrom(radius: WidgetUIRadius, own: Partial<WidgetUIComponentRadius>): WidgetUIComponentRadius {
+  return {
+    control: radius.md,
+    input: radius.md,
+    menu: radius.lg,
+    dialog: radius.xl,
+    panel: radius.lg,
+    tooltip: radius.sm,
+    tag: radius.sm,
+    toast: radius.lg,
+    toolbar: 0,
+    sidebar: 0,
+    ...own,
+  };
+}
+
+/** The presets, every token set. */
+export const WIDGET_UI_PRESETS: Readonly<Record<WidgetUIPreset, Readonly<ResolvedWidgetUI>>> = Object.freeze(
+  Object.fromEntries((Object.keys(PRESETS) as WidgetUIPreset[]).map((name) => [name, deepFreeze(resolvePreset(name))])) as Record<WidgetUIPreset, ResolvedWidgetUI>,
+);
+
+function resolvePreset(name: WidgetUIPreset): ResolvedWidgetUI {
+  const { density: _density, classic: _classic, ...base } = PRESETS[name];
+  return {
+    ...base,
+    preset: name,
+    density: 'comfortable',
+    scale: 'auto',
+    radius: { ...base.radius },
+    components: componentsFrom(base.radius, base.components),
+    sizes: { ...base.sizes },
+    font: { ...base.font },
+    borders: { ...base.borders },
+    shadows: { ...base.shadows },
+  };
+}
+
+function deepFreeze<T extends object>(value: T): T {
+  for (const v of Object.values(value)) if (v && typeof v === 'object') deepFreeze(v as object);
+  return Object.freeze(value);
+}
+
+const isPreset = (v: unknown): v is WidgetUIPreset => typeof v === 'string' && Object.prototype.hasOwnProperty.call(PRESETS, v);
+const px = (v: unknown, lo: number, hi: number): v is number => typeof v === 'number' && Number.isFinite(v) && v >= lo && v <= hi;
+/**
+ * CSS text that stays a value: no way out of the declaration, no URLs, and
+ * nothing the browser would drop (an open quote or bracket, a comment).
+ */
+const cssValue = (v: unknown): v is string =>
+  typeof v === 'string' && v.trim().length > 0 && v.length <= 300 && !/[;{}<>\\]|url\s*\(|expression\s*\(|\/\*/i.test(v) && balanced(v);
+
+/** Quotes closed and brackets matched. */
+function balanced(v: string): boolean {
+  let depth = 0;
+  let quote = '';
+  for (const ch of v) {
+    if (quote) {
+      if (ch === quote) quote = '';
+    } else if (ch === '"' || ch === "'") quote = ch;
+    else if (ch === '(') depth++;
+    else if (ch === ')' && --depth < 0) return false;
+  }
+  return depth === 0 && !quote;
+}
+const oneOf = <T extends string>(v: unknown, options: readonly T[]): v is T => typeof v === 'string' && (options as readonly string[]).includes(v);
+
+function pick<T extends object>(base: T, over: Partial<Record<keyof T, unknown>> | undefined, ok: (key: keyof T, v: unknown) => boolean): T {
+  const out = { ...base };
+  if (!over || typeof over !== 'object') return out;
+  for (const key of Object.keys(base) as (keyof T)[]) {
+    const v = over[key];
+    if (v !== undefined && ok(key, v)) (out as Record<keyof T, unknown>)[key] = v;
+  }
+  return out;
+}
+
+/**
+ * Every token of a look: a preset by name, or your theme over its preset
+ * (Print when none). What isn't a usable value is left at the preset's.
+ */
+export function resolveWidgetUI(theme?: WidgetUIPreset | WidgetUITheme): ResolvedWidgetUI {
+  const t: WidgetUITheme = typeof theme === 'string' ? { preset: theme } : theme ?? {};
+  const name: WidgetUIPreset = isPreset(t.preset) ? t.preset : DEFAULT_PRESET;
+  const base = PRESETS[name];
+
+  const radius = pick(base.radius, t.radius, (_, v) => px(v, 0, 999));
+  const density = oneOf(t.density, ['compact', 'classic', 'comfortable', 'spacious', 'airy'] as const) ? t.density : 'comfortable';
+  const sizes = pick(densitySizes(base, density), t.sizes, (key, v) => (key === 'icon' ? px(v, 10, 32) : px(v, 16, 80)));
+  const picked = pick(base.font, t.font, (key, v) => {
+    if (key === 'family' || key === 'mono') return cssValue(v);
+    if (key === 'size') return px(v, 11, 20);
+    if (key === 'weight' || key === 'strongWeight') return px(v, 100, 900);
+    if (key === 'labelCase') return v === 'none' || v === 'uppercase';
+    return px(v, 0, 0.5);
+  });
+  // Airy figures read in the look's own sans face, unless its figures face is set; Print's and Modern's
+  // in plain Segoe UI, as Segoe UI Variable's and Geist's digits are not one width and the chart's canvas can't ask.
+  const figures = picked.family === PRINT_SANS || picked.family === MODERN_SANS ? SANS_FONT_FAMILY : picked.family;
+  const font = density === 'airy' && t.font?.mono === undefined ? { ...picked, mono: figures } : picked;
+  // Corners the theme sets on the scale reach the parts that follow it.
+  const components = pick(componentsFrom(radius, base.components), t.components, (_, v) => px(v, 0, 999));
+  return {
+    preset: name,
+    density,
+    radius,
+    components,
+    sizes,
+    font,
+    borders: pick(base.borders, t.borders, (key, v) => (key === 'width' ? px(v, 0, 4) : typeof v === 'boolean')),
+    shadows: pick(base.shadows, t.shadows, (_, v) => cssValue(v)),
+    blur: px(t.blur, 0, 40) ? t.blur : base.blur,
+    active: oneOf(t.active, ['tint', 'solid', 'underline'] as const) ? t.active : base.active,
+    toolbar: oneOf(t.toolbar, ['docked', 'floating'] as const) ? t.toolbar : base.toolbar,
+    sidebar: oneOf(t.sidebar, ['docked', 'floating'] as const) ? t.sidebar : base.sidebar,
+    intervals: oneOf(t.intervals, ['plain', 'segmented'] as const) ? t.intervals : base.intervals,
+    tagRadius: px(t.tagRadius, 0, 999) ? t.tagRadius : base.tagRadius,
+    iconStroke: t.iconStroke === 0 || px(t.iconStroke, MIN_ICON_STROKE, MAX_ICON_STROKE) ? t.iconStroke : base.iconStroke,
+    scale: typeof t.scale === 'number' && Number.isFinite(t.scale) && t.scale >= MIN_SCALE && t.scale <= MAX_SCALE ? t.scale : 'auto',
+  };
+}
+
+/** The look as the widget's CSS variables. */
+export function widgetUIVariables(ui: ResolvedWidgetUI): Record<string, string> {
+  const p = (n: number) => `${n}px`;
+  const r = ui.radius;
+  const c = ui.components;
+  const s = ui.sizes;
+  const f = ui.font;
+  const compact = ui.density === 'compact';
+  const even = isEvenDensity(ui.density);
+  const tool = compact ? 1 : TOOL_STEP;
+  // A half step over the other buttons (an even size, so the icon centres on whole pixels),
+  // but never so wide the column keeps less than its room a side.
+  const toolStep = even ? evenPx(s.control * TOOL_STEP) : Math.round(s.control * TOOL_STEP);
+  const toolH = compact ? s.control : Math.min(toolStep, s.sidebar - 2 * TOOL_SIDE_ROOM);
+  const space = even ? SPACE_EVEN : SPACE_FIBONACCI;
+  const pad = p(even ? CONTROL_PAD.even : CONTROL_PAD.classic);
+  const [legendLine, paneLine] = even ? LEGEND_LINE.even : LEGEND_LINE.classic;
+  return {
+    ...Object.fromEntries(space.map((n, i) => [`--1p-space-${i + 1}`, p(n)])),
+    '--1p-control-pad': pad,
+    '--1p-bar-pad': pad,
+    '--1p-menu-row-pad': pad,
+    // The 7 px gaps of 1.x are 8 on the even ladder: the classic densities take the pixel back.
+    '--1p-odd': even ? '0px' : '1px',
+    // A line of body text an even number of pixels tall, so one line centres on whole pixels;
+    // unitless, so smaller and larger type keeps the ratio.
+    '--1p-line-height': even ? String(Math.round((evenPx(f.size * LINE_RATIO) / f.size) * 1e5) / 1e5) : String(LINE_RATIO),
+    '--1p-legend-line': p(legendLine),
+    '--1p-legend-line-pane': p(paneLine),
+    '--1p-line-xs': even ? p(evenPx(typeSize(f.size, -2) * LINE_RATIO)) : String(LINE_RATIO),
+    // The bars' text buttons a whole number of pixels wide, where the browser can round a box sized by its content.
+    '--1p-text-w': even ? TEXT_WIDTH_ROUNDED : 'auto',
+    '--1p-radius-xs': p(r.xs),
+    '--1p-radius-sm': p(r.sm),
+    '--1p-radius': p(r.md),
+    '--1p-radius-lg': p(r.lg),
+    '--1p-radius-xl': p(r.xl),
+    '--1p-control-radius': p(c.control),
+    '--1p-input-radius': p(c.input),
+    '--1p-menu-radius': p(c.menu),
+    '--1p-dialog-radius': p(c.dialog),
+    '--1p-panel-radius': p(c.panel),
+    '--1p-tooltip-radius': p(c.tooltip),
+    '--1p-tag-radius': p(c.tag),
+    '--1p-toast-radius': p(c.toast),
+    '--1p-toolbar-radius': p(c.toolbar),
+    '--1p-sidebar-radius': p(c.sidebar),
+    '--1p-toolbar-h': p(s.toolbar),
+    '--1p-control-h': p(s.control),
+    '--1p-control-h-sm': p(s.controlSmall),
+    '--1p-icon': p(s.icon),
+    '--1p-sidebar-w': p(s.sidebar),
+    '--1p-tool-h': p(toolH),
+    // An even size, so a 24-unit icon's strokes land on whole pixels.
+    '--1p-tool-icon': p(2 * Math.round((s.icon * tool) / 2)),
+    '--1p-menu-item-h': p(s.menuItem),
+    // 0 leaves the icons as drawn: the switch below turns the line width on.
+    '--1p-icon-stroke': p(ui.iconStroke ?? 0),
+    '--1p-font': f.family,
+    '--1p-font-mono': f.mono,
+    '--1p-font-size': p(f.size),
+    '--1p-font-size-sm': p(typeSize(f.size, -1)),
+    '--1p-font-size-xs': p(typeSize(f.size, -2)),
+    '--1p-font-size-lg': p(typeSize(f.size, 1)),
+    '--1p-font-size-xl': p(typeSize(f.size, 2)),
+    '--1p-font-size-display': p(typeSize(f.size, 3)),
+    '--1p-weight': String(f.weight),
+    '--1p-weight-strong': String(f.strongWeight),
+    '--1p-label-case': f.labelCase,
+    '--1p-label-tracking': `${f.labelTracking}em`,
+    // Labels in capitals read at the smallest size; labels as written need the next.
+    '--1p-label-size': p(typeSize(f.size, f.labelCase === 'uppercase' ? -2 : -1)),
+    '--1p-border-w': p(ui.borders.width),
+    '--1p-sep-w': ui.borders.separators ? p(Math.max(1, ui.borders.width)) : '0px',
+    '--1p-menu-shadow': ui.shadows.menu,
+    '--1p-dialog-shadow': ui.shadows.dialog,
+    '--1p-tooltip-shadow': ui.shadows.tooltip,
+    '--1p-blur': p(ui.blur),
+    // A frosted surface lets some of the chart through.
+    '--1p-surface-opacity': ui.blur > 0 ? '82%' : '100%',
+  };
+}
+
+/**
+ * Put the look on an element of the widget (its root, its modal portal):
+ * its tokens inline and its layout switches as data attributes. With
+ * `variables: false` only the switches; the tokens are left to the
+ * stylesheet (whose defaults are Modern's), and any set inline before are
+ * cleared.
+ */
+export function applyWidgetUI(el: HTMLElement, ui: ResolvedWidgetUI, options: { variables?: boolean } = {}): void {
+  const inline = options.variables !== false;
+  for (const [name, value] of Object.entries(widgetUIVariables(ui))) {
+    if (inline) el.style.setProperty(name, value);
+    else el.style.removeProperty(name);
+  }
+  el.dataset.pcwUi = ui.preset;
+  el.dataset.pcwActive = ui.active;
+  el.dataset.pcwToolbar = ui.toolbar;
+  el.dataset.pcwSidebar = ui.sidebar;
+  el.dataset.pcwIntervals = ui.intervals;
+  el.dataset.pcwSeparators = ui.borders.separators ? 'on' : 'off';
+  el.dataset.pcwIconStroke = (ui.iconStroke ?? 0) > 0 ? 'set' : 'drawn';
+}

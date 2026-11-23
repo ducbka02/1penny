@@ -1,0 +1,419 @@
+/* === The dock: the panels by the chart, and their rail === */
+
+/* In the body's row after the chart: the panel of the page open beside the chart, the rail at the outer edge
+   (both mirror in a right-to-left widget). */
+.pcw-dock {
+  position: relative;
+  display: flex;
+  flex: none;
+  min-height: 0;
+}
+
+/* The rail: as wide as the drawing tools on the other side, its buttons as theirs. */
+.pcw-dock-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--1p-space-2);
+  width: var(--1p-sidebar-w);
+  padding: var(--1p-space-3) 0;
+  border-inline-start: var(--1p-border-w) solid var(--1p-border);
+  background: var(--1p-bg-surface);
+}
+
+.pcw-dock-btn {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: var(--1p-tool-size);
+  height: var(--1p-tool-size);
+  padding: 0;
+  border: none;
+  border-radius: var(--1p-control-radius);
+  background: transparent;
+  color: var(--1p-text-muted);
+  cursor: pointer;
+  transition: background var(--1p-dur-fast) var(--1p-ease), color var(--1p-dur-fast) var(--1p-ease);
+}
+
+.pcw-dock-btn svg {
+  width: var(--1p-tool-icon-size);
+  height: var(--1p-tool-icon-size);
+}
+
+.pcw-dock-btn:hover {
+  background: var(--1p-hover-bg);
+  color: var(--1p-text);
+}
+
+/* The page open: in ink on its wash, as a tool in use on the other side. */
+.pcw-dock-btn[aria-pressed='true'] {
+  background: var(--1p-on-icon-bg, var(--1p-accent-soft));
+  color: var(--1p-on-icon-fg, var(--1p-accent));
+}
+
+.pcw-dock-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--1p-ring);
+}
+
+/* The edge in focus shows as its line, in ink: a ring round a strip this thin reads as two lines. */
+.pcw-dock-resize:focus-visible {
+  outline: none;
+}
+
+@media (forced-colors: active) {
+  .pcw-dock-resize:is(:hover, :active, :focus-visible)::after {
+    background: Highlight;
+  }
+}
+
+/* The panel: 262 wide to start (233 x phi^(1/4)), from 233 to 377. */
+.pcw-dock-panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: var(--1p-dock-w, 262px);
+  min-height: 0;
+  border-inline-start: var(--1p-border-w) solid var(--1p-border);
+  background: var(--1p-bg-surface);
+}
+
+/* Its edge by the chart: a strip to drag, a line in ink while in hand. */
+.pcw-dock-resize {
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: calc(var(--1p-space-3) * -1);
+  z-index: 3;
+  width: calc(var(--1p-space-3) * 2);
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.pcw-dock-resize::after {
+  content: '';
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: calc(var(--1p-space-3) - 1px);
+  width: 2px;
+  background: transparent;
+  transition: background var(--1p-dur-fast) var(--1p-ease);
+}
+
+.pcw-dock-resize:hover::after,
+.pcw-dock-resize:active::after,
+.pcw-dock-resize:focus-visible::after {
+  background: var(--1p-accent-fill);
+}
+
+/* A page's header: 34 tall (21 + 13), or a control's height where that is more, and the rule under
+   it. Its height and the page's scroll padding are both these, so they never part. */
+.pcw-dock-page {
+  --1p-dock-head-h: max(calc(var(--1p-space-6) + var(--1p-space-5)), var(--1p-control-h));
+  --1p-dock-head-rule: 1px;
+}
+
+/* A page fills the panel and scrolls under its header; the floating panels it was lose their card. */
+.pcw-dock-panel > .pcw-dock-page {
+  position: static;
+  inset: auto;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  width: auto;
+  max-width: none;
+  max-height: none;
+  min-height: 0;
+  margin: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  /* A row the keyboard moves to scrolls in below the header and its rule, not under them. */
+  scroll-padding-block-start: calc(var(--1p-dock-head-h) + var(--1p-dock-head-rule));
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  animation: none;
+}
+
+/* One header for every page: its title, its own buttons, and the close at the end. */
+.pcw-dock-page > :is(.pcw-watchlist-header, .pcw-alerts-header, .pcw-tree-header, .pcw-datawin-header, .pcw-syminfo-header, .pcw-ladder-header, .pcw-dock-host-header) {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: var(--1p-space-2);
+  flex: none;
+  min-height: var(--1p-dock-head-h);
+  margin: 0;
+  padding-block: 0;
+  padding-inline: var(--1p-space-5) var(--1p-space-3);
+  border-bottom: var(--1p-dock-head-rule) solid var(--1p-divider);
+  background: var(--1p-bg-surface);
+  color: var(--1p-text);
+  font-size: var(--1p-font-size-sm);
+  font-weight: var(--1p-weight-strong);
+}
+
+.pcw-dock-page > :is(.pcw-alerts-header, .pcw-tree-header, .pcw-datawin-header, .pcw-syminfo-header, .pcw-dock-host-header) > span:first-child {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pcw-dock-page :is(.pcw-watchlist-add, .pcw-watchlist-close, .pcw-alerts-new, .pcw-alerts-close, .pcw-tree-close, .pcw-datawin-close, .pcw-syminfo-close, .pcw-ladder-close, .pcw-dock-host-close) {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: var(--1p-control-h);
+  height: var(--1p-control-h);
+  padding: 0;
+  border: none;
+  border-radius: var(--1p-control-radius);
+  background: transparent;
+  color: var(--1p-text-muted);
+  cursor: pointer;
+}
+
+.pcw-dock-page :is(.pcw-watchlist-add, .pcw-watchlist-close, .pcw-alerts-new, .pcw-alerts-close, .pcw-tree-close, .pcw-datawin-close, .pcw-syminfo-close, .pcw-ladder-close, .pcw-dock-host-close):hover {
+  background: var(--1p-hover-bg);
+  color: var(--1p-text);
+}
+
+.pcw-dock-page :is(.pcw-watchlist-add, .pcw-watchlist-close, .pcw-alerts-new, .pcw-alerts-close, .pcw-tree-close, .pcw-datawin-close, .pcw-syminfo-close, .pcw-ladder-close, .pcw-dock-host-close):focus-visible {
+  outline: none;
+  box-shadow: var(--1p-ring);
+}
+
+/* What scrolled in a box of its own on a floating panel scrolls with the page here (a phone's caps too). */
+.pcw-dock-page :is(.pcw-alerts-list, .pcw-datawin-body, .pcw-watchlist-list, .pcw-tree-list) {
+  max-height: none;
+  overflow-y: visible;
+}
+
+.pcw-dock-page .pcw-watchlist-list {
+  flex: 1;
+}
+
+/* A page of the host's: its element under the header, in the panel's text, scrolling with the page. */
+.pcw-dock-host-body {
+  flex: 1;
+  min-width: 0;
+  color: var(--1p-text);
+  font-size: var(--1p-font-size-sm);
+}
+
+/* The watchlist was a bar of its own: its width and shadow are the panel's now. It scrolls as a page
+   (no overflow of its own here: this rule, as specific as the page's and later, would win). */
+.pcw-dock-panel > .pcw-watchlist {
+  width: auto;
+  border-inline-start: none;
+  box-shadow: none;
+}
+
+/* The symbol info's own padding sits under the header. */
+.pcw-dock-page.pcw-syminfo > .pcw-syminfo-body {
+  padding: var(--1p-space-5);
+}
+
+/* Narrow (a phone, a narrow column): no rail; the panel rises from the bottom over the chart, 61.8% tall. */
+.pcw-root[data-pcw-narrow] .pcw-dock-rail,
+.pcw-root[data-pcw-narrow] .pcw-dock-resize {
+  display: none;
+}
+
+.pcw-root[data-pcw-narrow] .pcw-dock {
+  position: static;
+}
+
+/* Above the chart's lines and tags, under its toasts; above the on-screen keyboard. */
+.pcw-root[data-pcw-narrow] .pcw-dock-panel {
+  position: absolute;
+  inset-inline: 0;
+  bottom: var(--1p-keyboard-inset, 0px);
+  z-index: 38;
+  width: auto;
+  height: 61.8%;
+  max-height: calc(100% - var(--1p-keyboard-inset, 0px));
+  border-inline-start: none;
+  border-top: var(--1p-border-w) solid var(--1p-border-strong);
+  border-radius: var(--1p-dialog-radius) var(--1p-dialog-radius) 0 0;
+  background: var(--1p-bg-elevated);
+  box-shadow: var(--1p-dialog-shadow);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+.pcw-root[data-pcw-narrow] .pcw-dock-page > :is(.pcw-watchlist-header, .pcw-alerts-header, .pcw-tree-header, .pcw-datawin-header, .pcw-syminfo-header, .pcw-ladder-header, .pcw-dock-host-header) {
+  background: var(--1p-bg-elevated);
+}
+
+/* The small buttons in a panel's rows: the browser's padding left their icons 8 px wide in a 20 px button. */
+:is(.pcw-tree-btn, .pcw-tree-add, .pcw-alerts-del, .pcw-watchlist-remove) {
+  padding: 0;
+}
+
+:is(.pcw-tree-btn, .pcw-tree-add, .pcw-alerts-del, .pcw-watchlist-remove) svg {
+  flex: none;
+}
+
+/* A page's title as the others': the watchlist's is its list's name, a menu. */
+.pcw-dock-page .pcw-watchlist-name {
+  height: var(--1p-control-h);
+  padding: 0 var(--1p-space-3);
+  margin-inline-start: calc(var(--1p-space-3) * -1);
+  color: var(--1p-text);
+  font-size: var(--1p-font-size-sm);
+  font-weight: var(--1p-weight-strong);
+  text-transform: none;
+  letter-spacing: normal;
+  flex: 0 1 auto;
+}
+
+/* Its caret beside the name, the add and close buttons at the end. */
+.pcw-dock-page .pcw-watchlist-name::after {
+  margin-inline-start: var(--1p-space-3);
+}
+
+.pcw-dock-page .pcw-watchlist-add {
+  margin-inline-start: auto;
+}
+
+/* === The depth ladder, a page of the dock === */
+
+.pcw-ladder-title {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  font: inherit;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/*
+ * Bid, price, ask: under the header, in the label case. The heading and each
+ * row are grids of their own, so their columns are fixed shares: a row's
+ * content (a mark of your orders) never moves its column off the others'.
+ */
+.pcw-ladder-cols,
+.pcw-ladder-row {
+  --1p-ladder-columns: minmax(0, 1fr) minmax(0, 1.3fr) minmax(0, 1fr);
+}
+.pcw-ladder-cols {
+  position: sticky;
+  top: calc(var(--1p-space-6) + var(--1p-space-5));
+  z-index: 1;
+  display: grid;
+  grid-template-columns: var(--1p-ladder-columns);
+  align-items: center;
+  height: var(--1p-space-6);
+  padding-inline: var(--1p-space-3);
+  border-bottom: 1px solid var(--1p-divider);
+  background: var(--1p-bg-surface);
+  color: var(--1p-text-muted);
+  font-size: var(--1p-font-size-xs);
+  font-weight: var(--1p-weight-strong);
+  text-transform: var(--1p-label-case);
+  letter-spacing: var(--1p-label-tracking);
+}
+.pcw-ladder-cols span:first-child { text-align: end; padding-inline-end: var(--1p-space-4); }
+.pcw-ladder-cols span:nth-child(2) { text-align: center; }
+.pcw-ladder-cols span:last-child { padding-inline-start: var(--1p-space-4); }
+
+.pcw-ladder-body { flex: 1; padding-inline: var(--1p-space-3); }
+
+/* A row 21 tall: the bid's size, the price, the ask's size, in the mono figures. */
+.pcw-ladder-row {
+  display: grid;
+  grid-template-columns: var(--1p-ladder-columns);
+  height: var(--1p-space-6);
+  font-family: var(--1p-font-mono);
+  font-size: var(--1p-font-size-sm);
+  font-variant-numeric: tabular-nums;
+}
+/* A side's size over a bar grown from the price outward, as long as its share of the largest. */
+.pcw-ladder-cell {
+  position: relative;
+  isolation: isolate;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  padding-inline: var(--1p-space-4);
+  border: none;
+  background: transparent;
+  color: var(--1p-text);
+  font: inherit;
+  cursor: pointer;
+}
+.pcw-ladder-cell::before {
+  content: '';
+  position: absolute;
+  inset-block: 2px;
+  z-index: -1;
+  width: var(--w, 0%);
+  border-radius: 1px;
+}
+.pcw-ladder-bid { justify-content: flex-end; }
+.pcw-ladder-bid::before { inset-inline-end: 0; background: var(--1p-green-soft); }
+.pcw-ladder-ask { justify-content: flex-start; }
+.pcw-ladder-ask::before { inset-inline-start: 0; background: var(--1p-red-soft); }
+.pcw-ladder-cell:not(:disabled):hover { background: var(--1p-hover-bg); }
+.pcw-ladder-cell:disabled { cursor: default; }
+.pcw-ladder-cell:focus-visible { outline: none; box-shadow: inset var(--1p-ring); }
+.pcw-ladder-price {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--1p-space-2);
+  min-width: 0;
+  overflow: hidden;
+  padding-inline: var(--1p-space-3);
+  border-inline: 1px solid var(--1p-divider);
+  white-space: nowrap;
+}
+.pcw-ladder-price.pcw-ask { color: var(--1p-red); }
+.pcw-ladder-price.pcw-bid { color: var(--1p-green); }
+/* Your orders at a price: their quantity, stamped in the side's colour. */
+.pcw-ladder-own {
+  flex: none;
+  padding-inline: var(--1p-space-2);
+  border-radius: 2px;
+  color: var(--1p-bg);
+  font-size: var(--1p-font-size-xs);
+  font-weight: var(--1p-weight-strong);
+}
+.pcw-ladder-own[data-side='buy'] { background: var(--1p-green); }
+.pcw-ladder-own[data-side='sell'] { background: var(--1p-red); }
+/* The spread, between the asks and the bids, on a torn-paper rule. */
+.pcw-ladder-spread {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: var(--1p-space-6);
+  border-block: 1px dashed var(--1p-border-strong);
+  color: var(--1p-text-muted);
+  font-family: var(--1p-font-mono);
+  font-size: var(--1p-font-size-xs);
+  font-variant-numeric: tabular-nums;
+}
+.pcw-ladder-empty {
+  padding: var(--1p-space-6);
+  color: var(--1p-text-muted);
+  font-size: var(--1p-font-size-sm);
+  text-align: center;
+}
+
+/* Narrow (a finger, not a pointer): rows a control tall, 26 not 21. */
+.pcw-root[data-pcw-narrow] .pcw-ladder-row {
+  height: var(--1p-control-h);
+}
+
+/* Forced colours drop the bars' and the marks' fills: the bars show in the system's highlight, the marks framed. */
+@media (forced-colors: active) {
+  .pcw-ladder-cell::before { forced-color-adjust: none; background: Highlight; opacity: 0.3; }
+  .pcw-ladder-cell:focus-visible { outline: 2px solid Highlight; outline-offset: -2px; }
+  .pcw-ladder-own { border: 1px solid CanvasText; }
+}

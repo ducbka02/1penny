@@ -1,0 +1,703 @@
+/* === Base controls: fields, selects, checks, sliders, calendar, scrollbars ===
+ *
+ * One look for every form control in the widget, from tokens. Fields are
+ * quiet until used: a faint fill and hairline, a firmer line on hover, and
+ * on focus the line turns accent (no ring). Selects and date fields open
+ * the widget's own list and calendar (formControls.ts).
+ */
+
+.pcw-root {
+  color-scheme: dark;
+
+  --1p-field-bg: rgba(230, 227, 220, 0.04);
+  --1p-field-bg-hover: rgba(230, 227, 220, 0.06);
+  --1p-field-bg-focus: rgba(230, 227, 220, 0.03);
+  --1p-field-line: rgba(230, 227, 220, 0.12);
+  --1p-field-line-hover: rgba(230, 227, 220, 0.22);
+  --1p-field-line-focus: var(--1p-accent-line);
+  --1p-field-placeholder: var(--1p-text-muted);
+  --1p-check-line: rgba(230, 227, 220, 0.3);
+  --1p-scroll-thumb: rgba(230, 227, 220, 0.14);
+  --1p-scroll-thumb-hover: rgba(230, 227, 220, 0.26);
+  /* Glyphs drawn in a field's background (a background image takes no currentColor). */
+  --1p-field-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M3 4.75l3 3 3-3' fill='none' stroke='%23918f8a' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  --1p-field-calendar: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cg fill='none' stroke='%23918f8a' stroke-width='1.3' stroke-linecap='round'%3E%3Crect x='2.5' y='3.5' width='11' height='10' rx='2'/%3E%3Cpath d='M2.5 6.5h11M5.5 2v3M10.5 2v3'/%3E%3C/g%3E%3C/svg%3E");
+  --1p-check-mark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 8.25l2.6 2.6L12 5.5' fill='none' stroke='%23131416' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+
+.pcw-root[data-pcw-theme='light'] {
+  color-scheme: light;
+
+  /* Fields are white boxes on the paper, ruled in ink, as on a printed form. */
+  --1p-field-bg: #ffffff;
+  --1p-field-bg-hover: #ffffff;
+  --1p-field-bg-focus: #ffffff;
+  --1p-field-line: rgba(27, 29, 33, 0.16);
+  --1p-field-line-hover: rgba(27, 29, 33, 0.3);
+  --1p-check-line: rgba(27, 29, 33, 0.34);
+  --1p-scroll-thumb: rgba(27, 29, 33, 0.16);
+  --1p-scroll-thumb-hover: rgba(27, 29, 33, 0.3);
+  --1p-field-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M3 4.75l3 3 3-3' fill='none' stroke='%236a6e75' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  --1p-field-calendar: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cg fill='none' stroke='%236a6e75' stroke-width='1.3' stroke-linecap='round'%3E%3Crect x='2.5' y='3.5' width='11' height='10' rx='2'/%3E%3Cpath d='M2.5 6.5h11M5.5 2v3M10.5 2v3'/%3E%3C/g%3E%3C/svg%3E");
+  --1p-check-mark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 8.25l2.6 2.6L12 5.5' fill='none' stroke='%23ffffff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+
+/* Modern's fields: the editor's input boxes, ruled in its input line. */
+.pcw-root:where([data-pcw-ui='modern']) {
+  --1p-field-bg: #313131;
+  --1p-field-bg-hover: #313131;
+  --1p-field-bg-focus: #313131;
+  --1p-field-line: #3c3c3c;
+  --1p-field-line-hover: #5a5a5a;
+  --1p-check-line: rgba(204, 204, 204, 0.35);
+  --1p-scroll-thumb: rgba(121, 121, 121, 0.4);
+  --1p-scroll-thumb-hover: rgba(100, 100, 100, 0.7);
+  --1p-field-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M3 4.75l3 3 3-3' fill='none' stroke='%239d9d9d' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  --1p-field-calendar: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cg fill='none' stroke='%239d9d9d' stroke-width='1.3' stroke-linecap='round'%3E%3Crect x='2.5' y='3.5' width='11' height='10' rx='2'/%3E%3Cpath d='M2.5 6.5h11M5.5 2v3M10.5 2v3'/%3E%3C/g%3E%3C/svg%3E");
+  --1p-check-mark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 8.25l2.6 2.6L12 5.5' fill='none' stroke='%231f1f1f' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+
+.pcw-root[data-pcw-theme='light']:where([data-pcw-ui='modern']) {
+  --1p-field-bg: #ffffff;
+  --1p-field-bg-hover: #ffffff;
+  --1p-field-bg-focus: #ffffff;
+  --1p-field-line: #cecece;
+  --1p-field-line-hover: #a5a5a5;
+  --1p-check-line: rgba(59, 59, 59, 0.4);
+  --1p-scroll-thumb: rgba(100, 100, 100, 0.4);
+  --1p-scroll-thumb-hover: rgba(0, 0, 0, 0.45);
+  --1p-field-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M3 4.75l3 3 3-3' fill='none' stroke='%23616161' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  --1p-field-calendar: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cg fill='none' stroke='%23616161' stroke-width='1.3' stroke-linecap='round'%3E%3Crect x='2.5' y='3.5' width='11' height='10' rx='2'/%3E%3Cpath d='M2.5 6.5h11M5.5 2v3M10.5 2v3'/%3E%3C/g%3E%3C/svg%3E");
+  --1p-check-mark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 8.25l2.6 2.6L12 5.5' fill='none' stroke='%231f1f1f' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+
+/* --- Text, number, date and time fields, and selects --- */
+
+/* Fields speak the widget's type, not the browser's (a part's own font still wins).
+ * The browser's control font resets the OpenType features, so --1p-font-features
+ * set on .pcw-root reaches every button and field only through this. */
+:where(.pcw-root) :where(input, select, textarea, button) {
+  font-family: inherit;
+  font-weight: inherit;
+  letter-spacing: inherit;
+  font-feature-settings: inherit;
+}
+
+.pcw-root :is(
+  .pcw-tf-custom-input,
+  .pcw-settings-select,
+  .pcw-settings-number,
+  .pcw-goto-input,
+  .pcw-watchlist-input,
+  .pcw-indi-input,
+  .pcw-style-name,
+  .pcw-drawing-text,
+  .pcw-replay-speed,
+  .pcw-alerts-form input:not([type='checkbox']),
+  .pcw-alerts-form select
+) {
+  border: 1px solid var(--1p-field-line);
+  border-radius: var(--1p-input-radius);
+  background-color: var(--1p-field-bg);
+  color: var(--1p-text);
+  outline: none;
+  box-shadow: none;
+  transition:
+    border-color var(--1p-dur-fast) var(--1p-ease),
+    background-color var(--1p-dur-fast) var(--1p-ease);
+}
+
+.pcw-root :is(
+  .pcw-tf-custom-input,
+  .pcw-settings-select,
+  .pcw-settings-number,
+  .pcw-goto-input,
+  .pcw-watchlist-input,
+  .pcw-indi-input,
+  .pcw-style-name,
+  .pcw-drawing-text,
+  .pcw-replay-speed,
+  .pcw-alerts-form input:not([type='checkbox']),
+  .pcw-alerts-form select
+):hover:not(:disabled, :focus) {
+  border-color: var(--1p-field-line-hover);
+  background-color: var(--1p-field-bg-hover);
+}
+
+.pcw-root :is(
+  .pcw-tf-custom-input,
+  .pcw-settings-select,
+  .pcw-settings-number,
+  .pcw-goto-input,
+  .pcw-watchlist-input,
+  .pcw-indi-input,
+  .pcw-style-name,
+  .pcw-drawing-text,
+  .pcw-replay-speed,
+  .pcw-alerts-form input:not([type='checkbox']),
+  .pcw-alerts-form select
+):is(:focus, :focus-visible, [aria-expanded='true']) {
+  border-color: var(--1p-field-line-focus);
+  background-color: var(--1p-field-bg-focus);
+  outline: none;
+  box-shadow: none;
+}
+
+.pcw-root :is(
+  .pcw-tf-custom-input,
+  .pcw-indi-input,
+  .pcw-watchlist-input,
+  .pcw-goto-input,
+  .pcw-alerts-form input:not([type='checkbox']),
+  .pcw-settings-number
+):is([aria-invalid='true']):is(*, :hover, :focus) {
+  /* As specific as the hover rule (its list holds the same :not) and later, so a wrong value stays red
+     under the pointer and in focus. */
+  border-color: var(--1p-red);
+  box-shadow: none;
+}
+
+.pcw-root :is(input, textarea)::placeholder {
+  color: var(--1p-field-placeholder);
+  opacity: 1;
+}
+
+.pcw-root :is(input, select, textarea):disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Selects: the browser's arrow gives way to a fine chevron. */
+.pcw-root select:not([multiple]):not([size]) {
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: var(--1p-field-chevron);
+  background-repeat: no-repeat;
+  background-size: 12px 12px;
+  background-position: right 8px center;
+  padding-inline-end: 26px;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.pcw-root[dir='rtl'] select:not([multiple]):not([size]),
+.pcw-root [dir='rtl'] select:not([multiple]):not([size]) {
+  background-position: left 8px center;
+}
+
+/* A select laid out left to right inside a right-to-left widget (the chart's
+ * own area is LTR, the replay's figures too) keeps its chevron on the right,
+ * where its padding is. */
+.pcw-root[dir='rtl'] [dir='ltr'] select:not([multiple]):not([size]),
+.pcw-root[dir='rtl'] select[dir='ltr']:not([multiple]):not([size]) {
+  background-position: right 8px center;
+}
+
+/* Number fields: the steppers show only on a field in use. */
+.pcw-root input[type='number']::-webkit-inner-spin-button,
+.pcw-root input[type='number']::-webkit-outer-spin-button {
+  opacity: 0;
+  transition: opacity var(--1p-dur-fast) var(--1p-ease);
+}
+
+.pcw-root input[type='number']:is(:hover, :focus)::-webkit-inner-spin-button {
+  opacity: 0.55;
+}
+
+/* Date and time: the widget's calendar icon where the browser's own can be hidden. */
+@supports selector(::-webkit-calendar-picker-indicator) {
+  .pcw-root input[type='date'] {
+    background-image: var(--1p-field-calendar);
+    background-repeat: no-repeat;
+    background-size: 15px 15px;
+    background-position: right 8px center;
+    padding-inline-end: 30px;
+    cursor: text;
+  }
+
+  .pcw-root[dir='rtl'] input[type='date'],
+  .pcw-root [dir='rtl'] input[type='date'] {
+    background-position: left 8px center;
+  }
+}
+
+.pcw-root input:is([type='date'], [type='time'])::-webkit-calendar-picker-indicator {
+  display: none;
+}
+
+.pcw-root input:is([type='date'], [type='time'])::-webkit-datetime-edit-fields-wrapper {
+  padding: 0;
+}
+
+/* --- Checkboxes and radios --- */
+
+.pcw-root input:is([type='checkbox'], [type='radio']) {
+  appearance: none;
+  -webkit-appearance: none;
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  border: 1.5px solid var(--1p-check-line);
+  border-radius: var(--1p-radius-sm);
+  background: transparent center / 14px 14px no-repeat;
+  cursor: pointer;
+  vertical-align: middle;
+  transition:
+    border-color var(--1p-dur-fast) var(--1p-ease),
+    background-color var(--1p-dur-fast) var(--1p-ease),
+    box-shadow var(--1p-dur-fast) var(--1p-ease);
+}
+
+.pcw-root input[type='radio'] {
+  border-radius: 50%;
+}
+
+.pcw-root input:is([type='checkbox'], [type='radio']):hover:not(:disabled) {
+  border-color: var(--1p-text-dim);
+}
+
+.pcw-root input[type='checkbox']:checked {
+  border-color: var(--1p-accent);
+  background-color: var(--1p-accent-fill);
+  background-image: var(--1p-check-mark);
+}
+
+.pcw-root input[type='radio']:checked {
+  border-color: var(--1p-accent);
+  background-image: radial-gradient(circle, var(--1p-accent) 0 3.5px, transparent 4px);
+}
+
+.pcw-root input:is([type='checkbox'], [type='radio']):focus {
+  outline: none;
+}
+
+.pcw-root input:is([type='checkbox'], [type='radio']):focus-visible {
+  box-shadow: 0 0 0 3px var(--1p-accent-soft);
+}
+
+/* --- Sliders --- */
+
+.pcw-root input[type='range'] {
+  appearance: none;
+  -webkit-appearance: none;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--1p-field-line-hover);
+  outline: none;
+  cursor: pointer;
+}
+
+.pcw-root input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--1p-accent-fill);
+  border: 2px solid var(--1p-bg-elevated);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  transition: transform var(--1p-dur-fast) var(--1p-ease);
+}
+
+.pcw-root input[type='range']::-moz-range-thumb {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--1p-accent-fill);
+  border: 2px solid var(--1p-bg-elevated);
+}
+
+.pcw-root input[type='range']:hover::-webkit-slider-thumb {
+  transform: scale(1.12);
+}
+
+.pcw-root input[type='range']:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 4px var(--1p-accent-soft);
+}
+
+/* --- The select list --- */
+
+.pcw-select-menu {
+  z-index: 120;
+  padding: var(--1p-menu-pad);
+  max-width: min(360px, calc(100vw - 16px));
+  font-size: var(--1p-font-size);
+}
+
+.pcw-select-group {
+  padding: var(--1p-space-4) var(--1p-space-4) var(--1p-space-2);
+  font-size: var(--1p-font-size-xs);
+  font-weight: var(--1p-weight-strong);
+  color: var(--1p-text-muted);
+  text-transform: var(--1p-label-case);
+  letter-spacing: var(--1p-label-tracking);
+}
+
+.pcw-select-option {
+  display: flex;
+  align-items: center;
+  gap: var(--1p-space-3);
+  min-height: var(--1p-menu-item-h);
+  padding-block: 0;
+  padding-inline: var(--1p-space-3) var(--1p-space-5);
+  border-radius: var(--1p-menu-item-radius);
+  color: var(--1p-text-dim);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.pcw-select-option-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pcw-select-check {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+}
+
+.pcw-select-option.pcw-active {
+  background: var(--1p-hover-bg);
+  color: var(--1p-text);
+}
+
+.pcw-select-option[aria-selected='true'] {
+  color: var(--1p-text);
+  font-weight: var(--1p-weight-strong);
+}
+
+.pcw-select-option[aria-selected='true'] .pcw-select-check {
+  background: var(--1p-accent-fill);
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3.5 8.25l3 3L12.5 5' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3.5 8.25l3 3L12.5 5' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+
+.pcw-select-option[aria-disabled='true'] {
+  opacity: 0.4;
+  cursor: default;
+  background: none;
+}
+
+/* --- The calendar --- */
+
+.pcw-calendar {
+  z-index: 120;
+  width: 268px;
+  padding: 10px;
+  background: var(--1p-bg-elevated);
+  border: var(--1p-border-w) solid var(--1p-border);
+  border-radius: var(--1p-menu-radius);
+  box-shadow: var(--1p-menu-shadow);
+  color: var(--1p-text);
+  font-size: var(--1p-font-size-sm);
+  backdrop-filter: blur(var(--1p-blur));
+  -webkit-backdrop-filter: blur(var(--1p-blur));
+  animation: pcw-pop-in var(--1p-dur-normal) var(--1p-ease-out);
+}
+
+.pcw-calendar-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.pcw-calendar-title {
+  flex: 1;
+  text-align: center;
+  font-size: var(--1p-font-size);
+  font-weight: var(--1p-weight-strong);
+  letter-spacing: -0.01em;
+}
+
+.pcw-calendar-nav {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: var(--1p-radius-sm);
+  background: transparent;
+  color: var(--1p-text-dim);
+  cursor: pointer;
+  transition: background var(--1p-dur-fast) var(--1p-ease), color var(--1p-dur-fast) var(--1p-ease);
+}
+
+.pcw-calendar-nav svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.pcw-calendar[dir='rtl'] .pcw-calendar-nav svg,
+[dir='rtl'] .pcw-calendar-nav svg {
+  transform: scaleX(-1);
+}
+
+.pcw-calendar-nav:hover {
+  background: var(--1p-hover-bg);
+  color: var(--1p-text);
+}
+
+.pcw-calendar-weekdays,
+.pcw-calendar-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+}
+
+.pcw-calendar-weekdays {
+  margin-bottom: 4px;
+  padding: 3px 0;
+  border-radius: var(--1p-radius-sm);
+  background: var(--1p-hover-bg);
+}
+
+.pcw-calendar-weekday {
+  text-align: center;
+  font-size: var(--1p-font-size-xs);
+  font-weight: var(--1p-weight-strong);
+  color: var(--1p-text-muted);
+  line-height: 20px;
+}
+
+.pcw-calendar-grid {
+  row-gap: 2px;
+}
+
+.pcw-calendar-week {
+  display: contents;
+}
+
+.pcw-calendar-day {
+  position: relative;
+  height: 32px;
+  padding: 0;
+  border: none;
+  border-radius: var(--1p-radius-sm);
+  background: transparent;
+  color: var(--1p-text);
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: background var(--1p-dur-fast) var(--1p-ease);
+}
+
+.pcw-calendar-day:hover:not(:disabled) {
+  background: var(--1p-hover-bg);
+}
+
+.pcw-calendar-day.pcw-outside {
+  color: var(--1p-text-muted);
+  opacity: 0.55;
+}
+
+/* Today: accent figures over a short line. */
+.pcw-calendar-day.pcw-today {
+  color: var(--1p-accent);
+  font-weight: var(--1p-weight-strong);
+}
+
+.pcw-calendar-day.pcw-today::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  bottom: 5px;
+  width: 12px;
+  height: 2px;
+  margin-left: -6px;
+  border-radius: 1px;
+  background: currentColor;
+}
+
+.pcw-calendar-day[aria-selected='true'] {
+  background: var(--1p-accent-fill);
+  color: var(--1p-accent-ink);
+  font-weight: var(--1p-weight-strong);
+  opacity: 1;
+}
+
+.pcw-calendar-day:disabled {
+  opacity: 0.28;
+  cursor: not-allowed;
+}
+
+.pcw-calendar-day:focus {
+  outline: none;
+}
+
+.pcw-calendar-day:focus-visible {
+  box-shadow: inset 0 0 0 1.5px var(--1p-accent);
+}
+
+.pcw-calendar-foot {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--1p-divider);
+}
+
+.pcw-calendar-today {
+  height: 26px;
+  padding: 0 10px;
+  border: none;
+  border-radius: var(--1p-radius-sm);
+  background: transparent;
+  color: var(--1p-accent);
+  font: inherit;
+  font-weight: var(--1p-weight-strong);
+  cursor: pointer;
+}
+
+.pcw-calendar-today:hover {
+  background: var(--1p-accent-soft);
+}
+
+.pcw-calendar-today:focus-visible,
+.pcw-calendar-nav:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 1.5px var(--1p-accent);
+}
+
+/* --- Scrollbars: thin and rounded, a thumb on no track. Low specificity:
+   a part that hides its bar keeps it hidden. --- */
+
+:where(.pcw-root) ::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+:where(.pcw-root) ::-webkit-scrollbar-track,
+:where(.pcw-root) ::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+:where(.pcw-root) ::-webkit-scrollbar-thumb {
+  background: var(--1p-scroll-thumb);
+  background-clip: padding-box;
+  border: 3px solid transparent;
+  border-radius: 999px;
+}
+
+:where(.pcw-root) ::-webkit-scrollbar-thumb:hover {
+  background: var(--1p-scroll-thumb-hover);
+  background-clip: padding-box;
+  border: 2.5px solid transparent;
+}
+
+/* Engines without the pseudo-elements take the standard properties. */
+@supports not selector(::-webkit-scrollbar) {
+  :where(.pcw-root, .pcw-root *) {
+    scrollbar-width: thin;
+    scrollbar-color: var(--1p-scroll-thumb) transparent;
+  }
+}
+
+/* --- Switches: flat, no glow --- */
+
+.pcw-root .pcw-toggle.pcw-on {
+  box-shadow: none;
+}
+
+.pcw-root .pcw-toggle::after {
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+}
+
+.pcw-root .pcw-toggle:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--1p-accent-soft);
+}
+
+/* One choice of a few in a row (a radio group): the chosen one as the look shows a chosen button. */
+.pcw-segmented {
+  display: inline-flex;
+  flex-wrap: wrap;
+  max-width: 100%;
+  gap: 2px;
+  padding: 2px;
+  border-radius: calc(var(--1p-control-radius) + 2px);
+  background: var(--1p-hover-bg);
+}
+.pcw-segment {
+  height: calc(var(--1p-control-h) - 4px);
+  padding-inline: var(--1p-space-4);
+  border: none;
+  border-radius: var(--1p-control-radius);
+  background: transparent;
+  color: var(--1p-text-dim);
+  font: inherit;
+  font-size: var(--1p-font-size-sm);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--1p-dur-fast) var(--1p-ease), color var(--1p-dur-fast) var(--1p-ease);
+}
+.pcw-segment:hover { color: var(--1p-text); }
+.pcw-segment[aria-checked='true'] {
+  background: var(--1p-on-bg);
+  color: var(--1p-on-fg);
+  font-weight: var(--1p-weight-strong);
+  box-shadow: var(--1p-on-ring);
+}
+.pcw-segment:focus-visible {
+  outline: none;
+  box-shadow: var(--1p-ring);
+}
+
+/* A number between a − and a +: one field, the figure right-aligned in the chart's mono type. */
+.pcw-stepper {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: stretch;
+  height: var(--1p-control-h);
+  border: var(--1p-border-w) solid var(--1p-border-strong);
+  border-radius: var(--1p-control-radius);
+  background: var(--1p-bg);
+  overflow: hidden;
+}
+.pcw-stepper:focus-within { box-shadow: var(--1p-ring); }
+.pcw-stepper .pcw-indi-input {
+  width: 110px;
+  height: auto;
+  padding-inline: var(--1p-space-3);
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  font-family: var(--1p-font-mono);
+  font-variant-numeric: tabular-nums;
+  text-align: end;
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+.pcw-stepper .pcw-indi-input::-webkit-inner-spin-button,
+.pcw-stepper .pcw-indi-input::-webkit-outer-spin-button { margin: 0; -webkit-appearance: none; }
+.pcw-stepper .pcw-indi-input:focus { outline: none; box-shadow: none; }
+.pcw-stepper-btn {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: var(--1p-control-h);
+  border: none;
+  background: transparent;
+  color: var(--1p-text-dim);
+  cursor: pointer;
+}
+.pcw-stepper-btn:hover { background: var(--1p-hover-bg); color: var(--1p-text); }
+.pcw-stepper-btn:focus-visible { outline: none; background: var(--1p-hover-bg); color: var(--1p-text); }
+
+/* Forced colours drop the box-shadow rings: an outline marks focus and the chosen choice. */
+@media (forced-colors: active) {
+  .pcw-segment[aria-checked='true'] { outline: 2px solid Highlight; }
+  .pcw-segment:focus-visible,
+  .pcw-stepper-btn:focus-visible { outline: 2px solid Highlight; outline-offset: -2px; }
+  .pcw-stepper:focus-within { outline: 2px solid Highlight; }
+}

@@ -1,0 +1,61 @@
+{
+  "name": "@1penny/mcp",
+  "mcpName": "io.github.ducbka02/1penny",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Model Context Protocol (MCP) server for @1penny/chart: inspect indicators, drawing tools, style keys, and validate chart options.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ducbka02/1penny.git",
+    "directory": "packages/mcp"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "ai",
+    "coding-agent",
+    "trading",
+    "charts",
+    "1penny",
+    "trading-chart",
+    "candlestick-chart",
+    "technical-analysis",
+    "indicators",
+    "drawing-tools"
+  ],
+  "homepage": "https://github.com/ducbka02/1penny",
+  "bin": {
+    "1penny-mcp": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20.19"
+  },
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite build --watch",
+    "clean": "rm -rf dist",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "pnpm build"
+  },
+  "dependencies": {
+    "@1penny/commons": "workspace:*"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.8"
+  }
+}

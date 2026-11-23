@@ -1,0 +1,170 @@
+import { describe, it, expect, vi } from 'vitest';
+import { buildSymbolInfoView, priorDayClose, sessionDay, SymbolNews } from '../symbolInfoView.js';
+import { EN_TRANSLATOR } from '../i18n.js';
+import type { SymbolInfoNews } from '../WidgetSymbolInfo.js';
+
+const DAY = 86_400_000;
+const T0 = Date.UTC(2026, 0, 5);
+const bars = [
+  { time: T0 - DAY + 3_600_000, open: 9, high: 10, low: 8, close: 9.5, volume: 100 },
+  { time: T0 + 3_600_000, open: 9.5, high: 11, low: 9, close: 10, volume: 200 },
+  { time: T0 + 7_200_000, open: 10, high: 12, low: 9.8, close: 11, volume: 300 },
+];
+
+describe('the symbol info view', () => {
+  it('takes the day’s numbers from the bars when there is no quote', () => {
+    const view = buildSymbolInfoView({
+      symbol: 'AAA',
+      info: { symbol: 'AAA', exchange: 'NASDAQ', type: 'stock' },
+      quote: undefined,
+      bars,
+      formatPrice: (p) => p.toFixed(2),
+      t: EN_TRANSLATOR,
+      textLocale: 'en',
+      numberLocale: 'en-US',
+      now: T0 + 8_000_000,
+    });
+    expect(view.price).toBe('11.00');
+    expect(view.change).toEqual({ text: '+1.50 (+15.79%)', up: true });
+    expect(view.meta).toBe('NASDAQ · stock');
+    expect(view.stats.find((s) => s.label === 'High')?.value).toBe('12.00');
+  });
+
+  it('writes the change’s percentage in the number locale, as its price', () => {
+    const german = new Intl.NumberFormat('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const view = (quote: { last: number; prevClose: number }) => buildSymbolInfoView({
+      symbol: 'AAA', info: null, quote: { symbol: 'AAA', ...quote }, bars, formatPrice: (p) => german.format(p),
+      t: EN_TRANSLATOR, textLocale: 'de', numberLocale: 'de-DE', now: T0 + 8_000_000,
+    }).change?.text;
+    expect(view({ last: 2_334.5, prevClose: 100 })).toBe('+2.234,50 (+2.234,50%)');
+    expect(view({ last: 9.5, prevClose: 11 })).toBe('-1,50 (-13,64%)');
+  });
+
+  it('writes the percentage in plain digits when its number locale is a tag Intl refuses', () => {
+    // A defensive fallback, as for the volume beside it: the view takes its locale as any
+    // string, and Intl throws a RangeError for 'pt_BR'.
+    const view = buildSymbolInfoView({
+      symbol: 'AAA', info: null, quote: { symbol: 'AAA', last: 11, prevClose: 9.5 }, bars, formatPrice: (p) => p.toFixed(2),
+      t: EN_TRANSLATOR, textLocale: 'en', numberLocale: 'pt_BR', now: T0 + 8_000_000,
+    });
+    expect(view.change).toEqual({ text: '+1.50 (+15.79%)', up: true });
+  });
+
+  it('names the symbol’s zone', () => {
+    const zoneOf = (info: { symbol: string; timeZone?: string }) => buildSymbolInfoView({
+      symbol: 'AAA', info, quote: undefined, bars, formatPrice: (p) => p.toFixed(2),
+      t: EN_TRANSLATOR, textLocale: 'en', numberLocale: 'en-US', now: T0 + 8_000_000,
+    }).stats.find((s) => s.label === 'Time zone')?.value;
+    expect(zoneOf({ symbol: 'AAA', timeZone: 'America/New_York' })).toBe('America/New_York');
+  });
+
+  it('takes the name, exchange and kind from `names` when it is given, the rest from `info`', () => {
+    const view = buildSymbolInfoView({
+      symbol: 'VNM',
+      info: { symbol: 'VNM', minTick: 100, currency: 'VND' },
+      names: { symbol: 'VNM', description: 'Vinamilk', exchange: 'HOSE', type: 'stock' },
+      quote: undefined, bars, formatPrice: (p) => p.toFixed(2),
+      t: EN_TRANSLATOR, textLocale: 'en', numberLocale: 'en-US', now: T0 + 8_000_000,
+    });
+    expect(view.description).toBe('Vinamilk');
+    expect(view.meta).toBe('HOSE · stock');
+    expect(view.stats.find((s) => s.label === 'Tick size')?.value).toBe('100');
+    const unnamed = buildSymbolInfoView({
+      symbol: 'VNM', info: { symbol: 'VNM', description: 'stale' }, names: null,
+      quote: undefined, bars, formatPrice: (p) => p.toFixed(2),
+      t: EN_TRANSLATOR, textLocale: 'en', numberLocale: 'en-US', now: T0 + 8_000_000,
+    });
+    expect(unnamed.description).toBeUndefined();
+  });
+
+  it('finds the latest day in the exchange’s zone', () => {
+    expect(sessionDay(bars, 'UTC')).toMatchObject({ open: 9.5, high: 12, low: 9, close: 11, volume: 500, prevClose: 9.5 });
+    expect(sessionDay([], 'UTC')).toBeNull();
+  });
+});
+
+describe('the close before the last day', () => {
+  // A day of minute bars and the start of the next, in seconds; each bar closes at its index.
+  const MINUTE = 60;
+  const bars = Array.from({ length: 1440 + 90 }, (_, i) => ({ time: i * MINUTE, open: i, high: i, low: i, close: i }));
+
+  it('is the last bar of the day before, found among many bars', () => {
+    expect(priorDayClose(bars, 'UTC')).toBe(1439);
+    expect(sessionDay(bars, 'UTC')).toMatchObject({ open: 1440, prevClose: 1439 });
+  });
+
+  it('reads the day in the exchange’s zone', () => {
+    // New York in January is five hours behind: the last bar, 01:29 UTC on the 6th, is
+    // still the 5th there, a day that started at 05:00 UTC, the 300th bar. In UTC it is the 6th.
+    const jan = bars.map((b) => ({ ...b, time: b.time + Date.UTC(2026, 0, 5) / 1000 }));
+    expect(priorDayClose(jan, 'America/New_York')).toBe(299);
+    expect(priorDayClose(jan, 'UTC')).toBe(1439);
+  });
+
+  it('is undefined when the bars hold only one day', () => {
+    expect(priorDayClose(bars.slice(0, 100), 'UTC')).toBeUndefined();
+    expect(priorDayClose(bars.slice(0, 1), 'UTC')).toBeUndefined();
+  });
+});
+
+describe('the news loader', () => {
+  it('caches a symbol’s headlines and drops an answer that comes too late', async () => {
+    const news = new SymbolNews();
+    const shown: SymbolInfoNews[] = [];
+    const source = vi.fn(async () => [{ id: '1', title: 'Up', time: Date.now() - 60_000 }]);
+    news.load('AAA', source, (n) => shown.push(n), 'en', () => false);
+    await vi.waitFor(() => expect(shown.at(-1)?.kind).toBe('items'));
+    news.load('AAA', source, (n) => shown.push(n), 'en', () => false);
+    expect(source).toHaveBeenCalledTimes(1);
+
+    const slow = vi.fn(() => new Promise<unknown[]>((resolve) => setTimeout(() => resolve([{ id: '2', title: 'Late', time: Date.now() }]), 10)));
+    const late: SymbolInfoNews[] = [];
+    news.load('BBB', slow, (n) => late.push(n), 'en', () => false);
+    news.load('CCC', null, (n) => late.push(n), 'en', () => false);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(late.map((n) => n.kind)).toEqual(['loading', 'none']);
+  });
+});
+
+describe('the headlines, shared by the panel and the chart\u2019s marks', () => {
+  const many = Array.from({ length: 30 }, (_, i) => ({ id: String(i), title: `Headline ${i}`, time: Date.now() - i * 60_000 }));
+
+  it('asks the source once for the two of them, and again only when the answer is old', async () => {
+    const news = new SymbolNews();
+    const source = vi.fn(async () => many);
+    const [a, b] = await Promise.all([news.headlines('AAA', source), news.headlines('AAA', source)]);
+    expect(source).toHaveBeenCalledTimes(1);
+    expect(a).toHaveLength(30);
+    expect(b).toBe(a);
+    await news.headlines('AAA', source);
+    expect(source).toHaveBeenCalledTimes(1);
+    await news.headlines('BBB', source);
+    expect(source).toHaveBeenCalledTimes(2);
+  });
+
+  it('shows the panel the newest ten of them', async () => {
+    const news = new SymbolNews();
+    const shown: SymbolInfoNews[] = [];
+    news.load('AAA', async () => many, (n) => shown.push(n), 'en', () => false);
+    await vi.waitFor(() => expect(shown.at(-1)?.kind).toBe('items'));
+    const last = shown.at(-1)!;
+    expect(last.kind === 'items' && last.items.map((i) => i.title)).toEqual(many.slice(0, 10).map((i) => i.title));
+  });
+
+  it('asks again after a source that failed', async () => {
+    const news = new SymbolNews();
+    const source = vi.fn().mockRejectedValueOnce(new Error('down')).mockResolvedValueOnce(many);
+    await expect(news.headlines('AAA', source)).rejects.toThrow('down');
+    await expect(news.headlines('AAA', source)).resolves.toHaveLength(30);
+  });
+});
+
+describe('the symbol info view’s volume', () => {
+  it('is in 만, 억 and 조 when the numbers are Korean', () => {
+    const view = buildSymbolInfoView({
+      symbol: 'AAA', info: null, quote: { symbol: 'AAA', last: 11, volume: 345_000_000 }, bars, formatPrice: (p) => p.toFixed(2),
+      t: EN_TRANSLATOR, textLocale: 'ko', numberLocale: 'ko-KR', now: T0 + 8_000_000,
+    });
+    expect(view.stats.find((s) => s.label === 'Volume')?.value).toBe('3.45억');
+  });
+});

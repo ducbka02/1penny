@@ -1,0 +1,102 @@
+export interface Point {
+  x: number;
+  y: number;
+}
+
+export interface Size {
+  width: number;
+  height: number;
+}
+
+export interface Rect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export type PriceScaleMode = 'regular' | 'logarithmic' | 'percentage' | 'indexedTo100';
+
+export interface ViewportState {
+  visibleRange: { from: number; to: number };
+  priceRange: { min: number; max: number };
+  barWidth: number;
+  barSpacing: number;
+  offset: number;
+  chartRect: Rect;
+  /**
+   * Logarithmic price geometry. Kept for back-compat; mirrors
+   * `scaleMode === 'logarithmic'`. Prefer reading `scaleMode`.
+   */
+  logScale?: boolean;
+  /**
+   * Price-scale presentation. `regular`, `percentage`, and `indexedTo100` share
+   * the same linear geometry — only the axis labels differ (rebased to
+   * `scaleBaseline`). `logarithmic` changes the geometry. Defaults to
+   * `regular` when unset.
+   */
+  scaleMode?: PriceScaleMode;
+  /**
+   * Reference price for `percentage` / `indexedTo100` axis labels — usually the
+   * close of the first visible bar. Set by the chart each frame.
+   */
+  scaleBaseline?: number;
+  /** Upside down: higher prices lower on screen. */
+  invertScale?: boolean;
+  /**
+   * How prices on this scale read, when the chart has a price format of its
+   * own (`ChartOptions.priceFormat`). Unset: decimals. Indicator panes leave
+   * it unset.
+   */
+  formatPrice?: (price: number) => string;
+  /** The number locale prices on this scale are grouped in (`'vi-VN'`: 72.202,13). Unset: en-US. */
+  numberLocale?: string;
+  /**
+   * A bar's time as the chart writes it under the crosshair (its time zone,
+   * its time formatter): a vertical line's time label. Unset: drawings show
+   * no time.
+   */
+  formatTime?: (time: number) => string;
+  /**
+   * Decimals prices on this scale show, when the market or the symbol sets
+   * them (`setMarket`, `SymbolInfo.pricePrecision`): drawing labels, price
+   * limits and the tags beside the axis use them. Unset: each label keeps its
+   * own decimals. Indicator panes and the left scale leave it unset.
+   */
+  pricePrecision?: number;
+  /**
+   * The step prices move in under that format (a 32nd): the axis puts its
+   * ticks on whole numbers of it.
+   */
+  priceUnit?: number;
+  /**
+   * Optional reference to the current bar series. When set, drawings/indicators
+   * treat `anchor.time` as a real timestamp and convert to bar index via
+   * `timestampToBarIndex(time, data)` at render/hit-test time. This lets
+   * anchors survive timeframe / symbol switches. When unset,
+   * `anchor.time` is treated as a raw bar index (legacy behavior).
+   */
+  data?: ReadonlyArray<{ time: number }>;
+  /**
+   * Width of the price axis strip right of `chartRect`, in CSS pixels. The
+   * chart widens it to fit long labels (sub-cent prices); renderers drawing
+   * badges on the axis size them to it. Defaults to `PRICE_AXIS_WIDTH`.
+   */
+  priceAxisWidth?: number;
+}
+
+/**
+ * What changed, for `requestRender()`. The chart paints two canvases: a scene
+ * (everything that follows data, viewport and chart objects) and a thin top
+ * canvas for pointer-tied visuals. Any type except `Hover` redraws both;
+ * `Hover` redraws only the top canvas (crosshair, its axis pills, legend,
+ * bar countdown, measure ruler, selection box).
+ */
+export enum LayerType {
+  Background = 0,
+  Main = 1,
+  Panel = 2,
+  Overlay = 3,
+  UI = 4,
+  Hover = 5,
+}

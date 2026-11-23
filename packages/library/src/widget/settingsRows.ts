@@ -1,0 +1,242 @@
+import { toHex } from './settingsControls.js';
+import { fill, type Translator } from './i18n.js';
+
+/**
+ * The rows of the chart settings: a section, a colour, a switch, a choice,
+ * a slider and a number, each with its label and calling back on change.
+ */
+
+/** Ids for the colour rows' descriptions. */
+let colorRowCount = 0;
+/** Ids for the number rows' hints. */
+let numberRowCount = 0;
+/** The most decimals a number in a hint shows: the smallest size taken, 0.00000001, has 8. */
+const HINT_MAX_DECIMALS = 20;
+
+/** A group of rows; a title names it to a screen reader too (rows named alike under several titles). */
+export function settingsSection(title?: string): HTMLDivElement {
+  const div = document.createElement('div');
+  div.className = 'pcw-settings-section';
+  if (title) {
+    const heading = document.createElement('div');
+    heading.className = 'pcw-settings-section-title';
+    heading.textContent = title;
+    div.appendChild(heading);
+    div.setAttribute('role', 'group');
+    div.setAttribute('aria-label', title);
+  }
+  return div;
+}
+
+function labelledRow(label: string): HTMLDivElement {
+  const row = document.createElement('div');
+  row.className = 'pcw-settings-row';
+  const lbl = document.createElement('span');
+  lbl.className = 'pcw-settings-label';
+  lbl.textContent = label;
+  row.appendChild(lbl);
+  return row;
+}
+
+/**
+ * A colour of the look, shown again from `look.read()`. With `look.start`,
+ * null is the part's own colour: shown as Auto, the picker starting from
+ * `start()`, and once set a button takes it back.
+ */
+export function colorRow(
+  label: string,
+  value: string | null,
+  onChange: (v: string | null) => void,
+  look: { read: () => string | null; start?: () => string | number | boolean | null },
+  t: Translator,
+): { row: HTMLDivElement; sync: () => void } {
+  const row = labelledRow(label);
+  const wrap = document.createElement('div');
+  wrap.className = 'pcw-color-picker-wrap';
+  const input = document.createElement('input');
+  input.type = 'color';
+  input.setAttribute('aria-label', label);
+  // What the swatch can't say (Auto, a colour with transparency) is read with it.
+  const hex = document.createElement('span');
+  hex.className = 'pcw-color-hex';
+  hex.id = `pcw-color-${++colorRowCount}`;
+  input.setAttribute('aria-describedby', hex.id);
+
+  let back: HTMLButtonElement | null = null;
+  const show = (v: string | null) => {
+    input.value = toHex(v ?? look.start?.());
+    hex.textContent = v ?? t('settings.auto');
+    row.classList.toggle('pcw-color-auto', v === null);
+    if (v !== null && look.start && !back) {
+      back = document.createElement('button');
+      back.type = 'button';
+      back.className = 'pcw-color-auto-btn';
+      back.textContent = t('settings.auto');
+      back.setAttribute('aria-label', `${label}: ${t('settings.auto')}`);
+      back.addEventListener('click', () => {
+        onChange(null);
+        // Focus stays in the row as the button goes; the chart may still draw a colour the host set.
+        input.focus();
+        show(look.read());
+      });
+      wrap.appendChild(back);
+    } else if (v === null && back) {
+      back.remove();
+      back = null;
+    }
+  };
+  input.addEventListener('input', () => {
+    onChange(input.value);
+    show(input.value);
+  });
+  wrap.append(input, hex);
+  row.appendChild(wrap);
+  show(value);
+  return { row, sync: () => show(look.read()) };
+}
+
+export function toggleRow(label: string, value: boolean, onChange: (v: boolean) => void): HTMLDivElement {
+  const row = labelledRow(label);
+  const toggle = document.createElement('button');
+  toggle.type = 'button';
+  toggle.className = `pcw-toggle${value ? ' pcw-on' : ''}`;
+  toggle.setAttribute('role', 'switch');
+  toggle.setAttribute('aria-checked', String(value));
+  toggle.setAttribute('aria-label', label);
+  toggle.addEventListener('click', () => {
+    const next = !toggle.classList.contains('pcw-on');
+    toggle.classList.toggle('pcw-on', next);
+    toggle.setAttribute('aria-checked', String(next));
+    onChange(next);
+  });
+  row.appendChild(toggle);
+  return row;
+}
+
+export function selectRow(
+  label: string,
+  value: string,
+  options: readonly { label: string; value: string }[],
+  onChange: (v: string) => void,
+): HTMLDivElement {
+  const row = labelledRow(label);
+  const select = document.createElement('select');
+  select.className = 'pcw-settings-select';
+  select.setAttribute('aria-label', label);
+  for (const opt of options) {
+    const o = document.createElement('option');
+    o.value = opt.value;
+    o.textContent = opt.label;
+    if (opt.value === value) o.selected = true;
+    select.appendChild(o);
+  }
+  // A value none of the options has (two keys that differ): nothing chosen, so any pick is a change.
+  if (!options.some((opt) => opt.value === value)) select.selectedIndex = -1;
+  select.addEventListener('change', () => onChange(select.value));
+  row.appendChild(select);
+  return row;
+}
+
+export function rangeRow(
+  label: string,
+  value: number,
+  range: { min: number; max: number; step: number },
+  onChange: (v: number) => void,
+  format: (v: number) => string = (v) => String(v),
+): HTMLDivElement {
+  const row = labelledRow(label);
+  const wrap = document.createElement('div');
+  wrap.className = 'pcw-settings-range';
+  const input = document.createElement('input');
+  input.type = 'range';
+  input.min = String(range.min);
+  input.max = String(range.max);
+  input.step = String(range.step);
+  input.value = String(value);
+  input.setAttribute('aria-label', label);
+  const out = document.createElement('span');
+  out.className = 'pcw-settings-range-val';
+  out.textContent = format(value);
+  input.addEventListener('input', () => {
+    const v = Number(input.value);
+    out.textContent = format(v);
+    onChange(v);
+  });
+  wrap.append(input, out);
+  row.appendChild(wrap);
+  return row;
+}
+
+/** What a number field takes. */
+export interface NumberLimits {
+  /** The field's step: '1' takes whole counts only, 'any' any number. */
+  step: string;
+  /** The largest number taken (Infinity: no limit). */
+  max: number;
+  /** The smallest number taken; without one, any number above 0. */
+  min?: number;
+}
+
+/** What a number field takes, in words: the hint under it once it turned a number away. */
+function limitsText(limits: NumberLimits, t: Translator, locale: string): string {
+  const format = new Intl.NumberFormat(locale, { maximumFractionDigits: HINT_MAX_DECIMALS }).format;
+  if (limits.step === '1' && Number.isFinite(limits.max)) {
+    return fill(t('settings.numberWhole'), { min: format(Math.max(1, limits.min ?? 1)), max: format(limits.max) });
+  }
+  return fill(t('settings.numberAtLeast'), { min: format(limits.min ?? 0) });
+}
+
+/**
+ * A number field; empty means "worked out from the data" (shown as Auto). Only numbers above 0, and from
+ * `limits.min` on, are taken; one turned away is marked invalid, and a hint under it, in `locale`, says what is.
+ */
+export function numberRow(
+  label: string,
+  value: number | null,
+  limits: NumberLimits,
+  onChange: (v: number | null) => void,
+  t: Translator,
+  locale = 'en-US',
+): HTMLDivElement {
+  const row = document.createElement('div');
+  row.className = 'pcw-settings-row pcw-settings-row--number';
+  const lbl = document.createElement('label');
+  lbl.className = 'pcw-settings-label';
+  lbl.textContent = label;
+  row.appendChild(lbl);
+  const input = document.createElement('input');
+  input.type = 'number';
+  input.className = 'pcw-settings-number';
+  // The min attribute is also where the arrows step from: at 1e-8, the up arrow turns 5 into 5.00000001 and an
+  // empty field into 1e-8. It stays 0, and the smallest number taken is checked on change.
+  input.min = '0';
+  input.step = limits.step;
+  if (Number.isFinite(limits.max)) input.max = String(limits.max);
+  input.placeholder = t('settings.auto');
+  input.value = value === null ? '' : String(value);
+  input.setAttribute('aria-label', label);
+  // Written when a number is turned away, and heard with the field: red alone says nothing to a screen reader.
+  const hint = document.createElement('div');
+  hint.className = 'pcw-settings-hint';
+  hint.id = `pcw-number-hint-${++numberRowCount}`;
+  hint.setAttribute('role', 'status');
+  input.setAttribute('aria-describedby', hint.id);
+  const mark = (ok: boolean) => {
+    if (ok) input.removeAttribute('aria-invalid');
+    else input.setAttribute('aria-invalid', 'true');
+    hint.textContent = ok ? '' : limitsText(limits, t, locale);
+  };
+  input.addEventListener('change', () => {
+    if (input.value.trim() === '') {
+      mark(true);
+      onChange(null);
+      return;
+    }
+    const v = Number(input.value);
+    const ok = Number.isFinite(v) && v > 0 && v >= (limits.min ?? 0) && v <= limits.max && (limits.step !== '1' || Number.isInteger(v));
+    mark(ok);
+    if (ok) onChange(v);
+  });
+  row.append(input, hint);
+  return row;
+}

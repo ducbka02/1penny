@@ -1,0 +1,171 @@
+import { smallValueDecimals } from '@1penny/commons';
+import { createIcon } from './icons.js';
+import { EN_TRANSLATOR, type Translator } from './i18n.js';
+import { markPart } from './widgetFeatures.js';
+import { coarsePointer } from './formControls.js';
+
+/** Decimals the change's percentage shows. */
+export const PERCENT_DECIMALS = 2;
+
+export interface DataWindowIndicator {
+  name: string;
+  /** `text`: the value as the legend writes it; without it, a figure the panel rounds itself. */
+  values: { key: string; value: number; text?: string }[];
+}
+
+export interface DataWindowModel {
+  ohlc: { open: number; high: number; low: number; close: number; volume: number } | null;
+  change: number;
+  /** The change as the prices are written (no sign); without it, `formatPrice` writes it. */
+  changeText?: string;
+  changePct: number;
+  indicators: DataWindowIndicator[];
+}
+
+export interface DataWindowCallbacks {
+  formatPrice: (price: number) => string;
+  /**
+   * The change's percentage in the number locale the prices are in, a fall's
+   * with its minus (the panel adds the + of a rise); without it, two decimals.
+   */
+  formatPercent?: (pct: number) => string;
+  /** The volume in the number locale the prices are in; without it, shortened to K, M and B. */
+  formatVolume?: (volume: number) => string;
+  /** Its close button: the dock it sits in shuts. Without it, the panel hides itself. */
+  onClose?: () => void;
+}
+
+/**
+ * Data Window — a floating readout of the exact O/H/L/C/V, change, and every
+ * active indicator value at the hovered bar. Updated from `crosshairMove`.
+ */
+export class WidgetDataWindow {
+  private el: HTMLDivElement;
+  private bodyEl: HTMLDivElement;
+  private callbacks: DataWindowCallbacks;
+  private open = false;
+
+  constructor(host: HTMLElement, callbacks: DataWindowCallbacks, private readonly t: Translator = EN_TRANSLATOR) {
+    this.callbacks = callbacks;
+
+    this.el = document.createElement('div');
+    this.el.className = 'pcw-datawin';
+    markPart(this.el, 'dataWindow');
+    this.el.hidden = true;
+
+    const header = document.createElement('div');
+    header.className = 'pcw-datawin-header';
+    const title = document.createElement('span');
+    title.textContent = this.t('dataWindow.title');
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.className = 'pcw-datawin-close';
+    closeBtn.setAttribute('aria-label', this.t('common.close'));
+    closeBtn.innerHTML = createIcon('x', 14);
+    closeBtn.addEventListener('click', () => (this.callbacks.onClose ? this.callbacks.onClose() : this.close()));
+    header.appendChild(title);
+    header.appendChild(closeBtn);
+    this.el.appendChild(header);
+
+    this.bodyEl = document.createElement('div');
+    this.bodyEl.className = 'pcw-datawin-body';
+    this.el.appendChild(this.bodyEl);
+
+    host.appendChild(this.el);
+  }
+
+  /** The panel, for the dock to hold. */
+  get element(): HTMLElement {
+    return this.el;
+  }
+
+  isOpen(): boolean {
+    return this.open;
+  }
+
+  toggle(): void {
+    this.open ? this.close() : this.openPanel();
+  }
+
+  openPanel(): void {
+    this.open = true;
+    this.el.hidden = false;
+  }
+
+  close(): void {
+    this.open = false;
+    this.el.hidden = true;
+  }
+
+  destroy(): void {
+    this.el.remove();
+  }
+
+  render(model: DataWindowModel): void {
+    if (!this.open) return;
+    this.bodyEl.replaceChildren();
+
+    if (!model.ohlc) {
+      const empty = document.createElement('div');
+      empty.className = 'pcw-datawin-empty';
+      // A finger has no hover: it touches the chart to put the crosshair on a bar.
+      empty.textContent = this.t(coarsePointer() ? 'dataWindow.touch' : 'dataWindow.hover');
+      this.bodyEl.appendChild(empty);
+      return;
+    }
+
+    const fp = this.callbacks.formatPrice;
+    const o = model.ohlc;
+    this.bodyEl.appendChild(this.row(this.t('dataWindow.open'), fp(o.open)));
+    this.bodyEl.appendChild(this.row(this.t('dataWindow.high'), fp(o.high)));
+    this.bodyEl.appendChild(this.row(this.t('dataWindow.low'), fp(o.low)));
+    this.bodyEl.appendChild(this.row(this.t('dataWindow.close'), fp(o.close)));
+    const tone = model.change > 0 ? 'up' : model.change < 0 ? 'down' : '';
+    const sign = model.change > 0 ? '+' : '';
+    const pct = this.callbacks.formatPercent?.(model.changePct) ?? model.changePct.toFixed(PERCENT_DECIMALS);
+    const changeText = model.changeText ?? fp(model.change);
+    this.bodyEl.appendChild(this.row(this.t('dataWindow.change'), `${sign}${changeText} (${sign}${pct}%)`, tone));
+    this.bodyEl.appendChild(this.row(this.t('dataWindow.volume'), (this.callbacks.formatVolume ?? shortVolume)(o.volume)));
+
+    for (const ind of model.indicators) {
+      const head = document.createElement('div');
+      head.className = 'pcw-datawin-sub';
+      head.textContent = ind.name;
+      this.bodyEl.appendChild(head);
+      for (const v of ind.values) {
+        this.bodyEl.appendChild(this.row(v.key, v.text ?? formatNumber(v.value)));
+      }
+    }
+  }
+
+  private row(label: string, value: string, tone = ''): HTMLDivElement {
+    const row = document.createElement('div');
+    row.className = 'pcw-datawin-row';
+    const l = document.createElement('span');
+    l.className = 'pcw-datawin-label';
+    l.textContent = label;
+    const v = document.createElement('span');
+    v.className = `pcw-datawin-value${tone ? ` pcw-${tone}` : ''}`;
+    v.textContent = value;
+    row.appendChild(l);
+    row.appendChild(v);
+    return row;
+  }
+}
+
+function formatNumber(v: number): string {
+  if (!Number.isFinite(v)) return '—';
+  const abs = Math.abs(v);
+  if (abs >= 1000) return v.toFixed(2);
+  if (abs >= 1) return v.toFixed(4);
+  // Four figures in plain decimals: `toPrecision` writes a value under a millionth as "7.855e-8".
+  return v.toFixed(smallValueDecimals(v));
+}
+
+/** A volume shortened to K, M and B. */
+export function shortVolume(v: number): string {
+  if (v >= 1_000_000_000) return (v / 1_000_000_000).toFixed(2) + 'B';
+  if (v >= 1_000_000) return (v / 1_000_000).toFixed(2) + 'M';
+  if (v >= 1_000) return (v / 1_000).toFixed(2) + 'K';
+  return v.toFixed(0);
+}

@@ -1,0 +1,83 @@
+import type { DataSeries, ViewportState, Theme } from '@1penny/commons';
+import { barIndexToX } from '../viewport/ScaleMapping.js';
+import type { GpuRect } from '../engine/gpu.js';
+import { isRegularSession, mergeSessionHours, type SessionHoursConfig, type SessionWindow } from './sessionHours.js';
+
+/** US equity regular trading hours (09:30–16:00 ET) as a sensible default. */
+export const DEFAULT_SESSION_HOURS: SessionHoursConfig = {
+  startMinute: 9 * 60 + 30,
+  endMinute: 16 * 60,
+  tzOffsetMinutes: -300,
+  timeZone: 'America/New_York',
+};
+
+/**
+ * Dims bars outside the regular session (pre-/post-market or the overnight
+ * break) with a translucent overlay, so the regular session stands out. Drawn
+ * on the background layer behind candles.
+ */
+export class SessionShading {
+  private visible = false;
+  private config: SessionHoursConfig = { ...DEFAULT_SESSION_HOURS };
+
+  setVisible(v: boolean): void {
+    this.visible = v;
+  }
+  isVisible(): boolean {
+    return this.visible;
+  }
+  setConfig(config: Partial<SessionHoursConfig>): void {
+    this.config = mergeSessionHours(this.config, config);
+  }
+
+  /** Replace the whole config, rather than merging into it. */
+  replaceConfig(config: SessionHoursConfig): void {
+    this.config = mergeSessionHours(config, {});
+  }
+  getConfig(): SessionHoursConfig {
+    return {
+      ...this.config,
+      windows: this.config.windows?.map((w: SessionWindow) => ({ ...w })),
+    };
+  }
+
+  render(ctx: CanvasRenderingContext2D, data: DataSeries, viewport: ViewportState, theme: Theme): void {
+    const rects = this.rects(data, viewport, theme);
+    if (rects.length === 0) return;
+    ctx.save();
+    ctx.fillStyle = rects[0].color;
+    for (const r of rects) ctx.fillRect(r.x, r.y, r.width, r.height);
+    ctx.restore();
+  }
+
+  /** The shaded areas: a rectangle per run of bars outside the session. */
+  rects(data: DataSeries, viewport: ViewportState, theme: Theme): GpuRect[] {
+    if (!this.visible || data.length === 0) return [];
+    const { chartRect } = viewport;
+    const { from, to } = viewport.visibleRange;
+    const start = Math.max(0, from);
+    const end = Math.min(to, data.length - 1);
+    if (end < start) return [];
+
+    const barUnit = viewport.barWidth + viewport.barSpacing;
+    const color = theme.name === 'light' ? 'rgba(0,0,0,0.045)' : 'rgba(0,0,0,0.28)';
+    const out: GpuRect[] = [];
+    // Coalesce consecutive out-of-session bars into one rect to minimise draws.
+    let runStart = -1;
+    const flush = (lo: number, hi: number): void => {
+      const x0 = barIndexToX(lo, viewport) - barUnit / 2;
+      const x1 = barIndexToX(hi, viewport) + barUnit / 2;
+      out.push({ x: x0, y: chartRect.y, width: x1 - x0, height: chartRect.height, color, alpha: 1 });
+    };
+    for (let i = start; i <= end; i++) {
+      const outside = !isRegularSession(data[i].time, this.config);
+      if (outside && runStart === -1) runStart = i;
+      else if (!outside && runStart !== -1) {
+        flush(runStart, i - 1);
+        runStart = -1;
+      }
+    }
+    if (runStart !== -1) flush(runStart, end);
+    return out;
+  }
+}

@@ -1,0 +1,261 @@
+// @vitest-environment jsdom
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import type { OHLCBar, ViewportState } from '@1penny/commons';
+import { TimeAxis, panelTagText } from '@1penny/core';
+import { MARKET_HOSE, PRICE_AXIS_WIDTH } from '@1penny/commons';
+import { Chart } from '../Chart.js';
+import { installChartStubs, sizedHost } from './chartTestEnv.js';
+
+const HOUR = 3_600_000;
+const T0 = Date.UTC(2026, 0, 1);
+const bars: OHLCBar[] = Array.from({ length: 80 }, (_, i) => {
+  const p = 110 + Math.sin(i / 6) * 2;
+  return { time: T0 + i * HOUR, open: p, high: p + 0.3, low: p - 0.3, close: p + 0.1, volume: 100 };
+});
+
+let host: HTMLDivElement;
+let chart: Chart;
+
+beforeEach(() => {
+  installChartStubs();
+  host = sizedHost();
+});
+
+afterEach(() => {
+  chart?.destroy();
+  host.remove();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
+type Probe = {
+  viewport: { getState(): ViewportState };
+  buildPanelRenderInfos(): { viewport: ViewportState }[];
+};
+
+describe('the tags beside the price axis', () => {
+  it('group prices in the chart’s number locale, as the axis does', () => {
+    chart = new Chart(host, { numberLocale: 'vi-VN' });
+    chart.setData(bars);
+    const state = () => (chart as unknown as Probe).viewport.getState();
+    expect(state().numberLocale).toBe('vi-VN');
+    chart.setNumberLocale('de-DE');
+    expect(state().numberLocale).toBe('de-DE');
+  });
+});
+
+describe('a chart’s price step', () => {
+  it('is the symbol’s smallest step, a fraction’s unit, or one unit of the decimals shown', () => {
+    chart = new Chart(host, {});
+    chart.setData(bars);
+    expect(chart.getPriceStep()).toBe(0.01);
+    chart.setSymbolInfo({ symbol: 'VNM', pricePrecision: 0 });
+    expect(chart.getPriceStep()).toBe(1);
+    chart.setSymbolInfo({ symbol: 'VNM', pricePrecision: 0, minTick: 10 });
+    expect(chart.getPriceStep()).toBe(10);
+    chart.setSymbolInfo(null);
+    chart.setPriceFormat({ denominator: 32 });
+    expect(chart.getPriceStep()).toBe(1 / 32);
+  });
+});
+
+describe('a chart on a market with price bands', () => {
+  it('rounds to the step of the price’s band, and gives the step at a price', () => {
+    chart = new Chart(host, {});
+    chart.setData(bars);
+    chart.setMarket(MARKET_HOSE);
+    expect(chart.roundPrice(9.987)).toBe(9.99);
+    expect(chart.roundPrice(25.37)).toBe(25.35);
+    expect(chart.roundPrice(120.47)).toBe(120.5);
+    expect(chart.getPriceStep(9.5)).toBe(0.01);
+    expect(chart.getPriceStep(25)).toBe(0.05);
+    // Without a price: the step at the last close (about 110 here).
+    expect(chart.getPriceStep()).toBe(0.1);
+    // A symbol's own step still comes first.
+    chart.setSymbolInfo({ symbol: 'FPT', minTick: 0.01 });
+    expect(chart.roundPrice(25.37)).toBe(25.37);
+  });
+
+  it('keeps the market it was given, and draws limits from a copy', () => {
+    chart = new Chart(host, {});
+    chart.setData(bars);
+    chart.setMarket(MARKET_HOSE);
+    chart.setPriceLimits(108);
+    expect(chart.getMarket()?.priceLimits?.referencePrice).toBe(108);
+    expect(MARKET_HOSE.priceLimits?.referencePrice).toBeUndefined();
+  });
+
+  it('draws the limits as soon as the reference is given, and moves them with a new one', () => {
+    chart = new Chart(host, {});
+    chart.setData(bars);
+    chart.setMarket(MARKET_HOSE);
+    type Engine = { engine: { setRenderContext(ctx: { priceLimits?: { reference: number } | null }): void } };
+    const engine = (chart as unknown as Engine).engine;
+    const drawn: (number | null)[] = [];
+    const set = engine.setRenderContext.bind(engine);
+    vi.spyOn(engine, 'setRenderContext').mockImplementation((ctx) => {
+      drawn.push(ctx.priceLimits?.reference ?? null);
+      set(ctx as never);
+    });
+    chart.setPriceLimits(108);
+    expect(drawn.at(-1)).toBe(108);
+    chart.setPriceLimits(110);
+    expect(drawn.at(-1)).toBe(110);
+  });
+});
+
+describe('a chart’s price format', () => {
+  it('prints prices in fractions of a point, and rounds them to the fraction', () => {
+    chart = new Chart(host, { priceFormat: { denominator: 32 } });
+    chart.setData(bars);
+    expect(chart.formatPrice(101.5)).toBe("101'16");
+    expect(chart.roundPrice(101.51)).toBe(101.5);
+    const vp = (chart as unknown as Probe).viewport.getState();
+    expect(vp.formatPrice?.(110.25)).toBe("110'08");
+    expect(vp.priceUnit).toBe(1 / 32);
+  });
+
+  it('takes a function of yours, and goes back to decimals', () => {
+    chart = new Chart(host, { priceFormat: (p) => `$${p.toFixed(1)}` });
+    chart.setData(bars);
+    expect(chart.formatPrice(12.34)).toBe('$12.3');
+    chart.setPriceFormat(null);
+    expect(chart.formatPrice(12.34)).toBe('12.34');
+    expect((chart as unknown as Probe).viewport.getState().formatPrice).toBeUndefined();
+  });
+
+  it('leaves indicator panes in their own numbers', () => {
+    chart = new Chart(host, { priceFormat: { denominator: 32 } });
+    chart.setData(bars);
+    chart.addIndicator('rsi');
+    const pane = (chart as unknown as Probe).buildPanelRenderInfos()[0].viewport;
+    expect(pane.formatPrice).toBeUndefined();
+    expect(pane.priceUnit).toBeUndefined();
+  });
+
+  it('widens the price axis for the labels it prints', () => {
+    chart = new Chart(host, {});
+    chart.setData(bars);
+    const before = (chart as unknown as Probe).viewport.getState().priceAxisWidth ?? 0;
+    chart.setPriceFormat((p) => `${p.toFixed(2)} long units label`);
+    chart.resize();
+    expect((chart as unknown as Probe).viewport.getState().priceAxisWidth ?? 0).toBeGreaterThan(before);
+  });
+
+  // A pane of millions (CVD at -1,766,028.9) shares the axis sized to prices of 110: its tag was cut,
+  // and the tick under it hidden behind it.
+  it('widens the price axis for an indicator pane’s labels and tags too', () => {
+    const big = bars.map((b, i) => ({ ...b, volume: 123_456_789 + i * 9_876 }));
+    chart = new Chart(host, {});
+    chart.setData(big);
+    // Unset until the axis is first widened: the default width.
+    const width = () => (chart as unknown as Probe).viewport.getState().priceAxisWidth ?? PRICE_AXIS_WIDTH;
+    const alone = width();
+    chart.addIndicator('obv');
+    chart.resize();
+    const withPane = width();
+    expect(withPane).toBeGreaterThan(alone);
+    // Wide enough for the pane's latest value as its tag writes it, at the test's 6 px a character.
+    const pane = (chart as unknown as Probe).buildPanelRenderInfos()[0] as { instanceId: string; viewport: ViewportState };
+    const latest = (chart as unknown as { indicatorEngine: { getLatestValues(id: string): { value: number }[] } }).indicatorEngine.getLatestValues(pane.instanceId)[0].value;
+    const tag = panelTagText(latest, pane.viewport, 'en-US');
+    expect(withPane).toBeGreaterThanOrEqual(tag.length * 6 + 14);
+    // The pane gone, the axis fits the prices again.
+    chart.removeIndicator(chart.getActiveIndicators()[0].instanceId);
+    chart.resize();
+    expect(width()).toBe(alone);
+  });
+
+  it('makes no room for a pane folded to its header, which writes nothing on the axis', () => {
+    const big = bars.map((b, i) => ({ ...b, volume: 123_456_789 + i * 9_876 }));
+    chart = new Chart(host, {});
+    chart.setData(big);
+    const width = () => (chart as unknown as Probe).viewport.getState().priceAxisWidth ?? PRICE_AXIS_WIDTH;
+    const alone = width();
+    const id = chart.addIndicator('obv')!;
+    chart.setIndicatorValueLabelsVisible(true);
+    chart.resize();
+    expect(width()).toBeGreaterThan(alone);
+    chart.setPaneCollapsed(id, true);
+    chart.resize();
+    expect(width()).toBe(alone);
+  });
+
+  it('widens the price axis for a pane’s tags as soon as they are turned on', () => {
+    // A/D's values carry a decimal its tag writes and its scale's round ticks don't: "3,292,839,123.3".
+    const big = bars.map((b, i) => ({ ...b, volume: 123_456_789 + i * 9_876 }));
+    chart = new Chart(host, {});
+    chart.setData(big);
+    chart.addIndicator('ad');
+    chart.resize();
+    const probe = chart as unknown as Probe & { indicatorEngine: { getLatestValues(id: string): { value: number }[] } };
+    const pane = probe.buildPanelRenderInfos()[0] as { instanceId: string; viewport: ViewportState };
+    const tag = panelTagText(probe.indicatorEngine.getLatestValues(pane.instanceId)[0].value, pane.viewport, 'en-US');
+    const width = () => probe.viewport.getState().priceAxisWidth ?? PRICE_AXIS_WIDTH;
+    expect(width()).toBeLessThan(tag.length * 6 + 14);
+    chart.setIndicatorValueLabelsVisible(true);
+    expect(width()).toBeGreaterThanOrEqual(tag.length * 6 + 14);
+  });
+});
+
+describe('the market’s and the symbol’s decimals', () => {
+  it('go on the viewport, for drawing labels, price limits and plugins', () => {
+    chart = new Chart(host, {});
+    chart.setData(bars);
+    const state = () => (chart as unknown as Probe).viewport.getState();
+    expect(state().pricePrecision).toBeUndefined();
+    chart.setSymbolInfo({ symbol: 'BTC', pricePrecision: 1 });
+    expect(state().pricePrecision).toBe(1);
+    // The market's win over the symbol's, as on the axis.
+    chart.setMarket({ type: 'crypto', pricePrecision: 3 });
+    expect(state().pricePrecision).toBe(3);
+    expect(chart.formatPrice(100_018.7)).toBe('100,018.700');
+    chart.setSymbolInfo({ symbol: 'BTC', pricePrecision: 1 });
+    expect(state().pricePrecision).toBe(3);
+  });
+
+  it('are cleared with the symbol’s, and stay off indicator panes', () => {
+    chart = new Chart(host, {});
+    chart.setData(bars);
+    chart.setSymbolInfo({ symbol: 'BTC', pricePrecision: 1 });
+    chart.addIndicator('rsi');
+    expect((chart as unknown as Probe).buildPanelRenderInfos()[0].viewport.pricePrecision).toBeUndefined();
+    chart.setSymbolInfo(null);
+    expect((chart as unknown as Probe).viewport.getState().pricePrecision).toBeUndefined();
+  });
+
+  it('reach the pinned tooltip, in the number locale', () => {
+    chart = new Chart(host, { numberLocale: 'de-DE' });
+    chart.setData(bars);
+    chart.setSymbolInfo({ symbol: 'BTC', pricePrecision: 1 });
+    const tooltip = (chart as unknown as { pinnedTooltip: { pin(bar: OHLCBar, index: number, theme: unknown): void } }).pinnedTooltip;
+    tooltip.pin({ time: T0, open: 100_000, high: 100_085.3, low: 99_990.1, close: 100_018.7, volume: 1 }, 0, chart.getTheme());
+    expect(host.textContent).toContain('100.018,7');
+  });
+});
+
+describe('a chart’s time format', () => {
+  it('goes to the time axis, the crosshair and the tooltip', () => {
+    const toAxis = vi.spyOn(TimeAxis.prototype, 'setTimeFormatter');
+    const format = (time: number) => new Date(time).toISOString();
+    chart = new Chart(host, { timeFormatter: format });
+    expect(toAxis).toHaveBeenCalledWith(format);
+    chart.setTimeFormatter(null);
+    expect(toAxis).toHaveBeenLastCalledWith(null);
+  });
+});
+
+describe('the chart’s shapes', () => {
+  it('rounds its tags, through theme changes too', () => {
+    chart = new Chart(host, { shapes: { tagRadius: 6 } });
+    expect(chart.getShapes()).toEqual({ tagRadius: 6 });
+    chart.setTheme('light');
+    expect(chart.getShapes()).toEqual({ tagRadius: 6 });
+    chart.setShapes({ tagRadius: 999 });
+    expect(chart.getTheme().shape).toEqual({ tagRadius: 999 });
+    chart.setShapes({ tagRadius: -3 });
+    expect(chart.getShapes()).toEqual({ tagRadius: 999 }); // not a radius: nothing changes
+    chart.setTheme('dark');
+    expect(chart.getShapes()).toEqual({ tagRadius: 999 }); // and the shape still outlasts a theme switch
+  });
+});

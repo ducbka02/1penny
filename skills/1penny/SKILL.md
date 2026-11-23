@@ -1,0 +1,436 @@
+---
+name: 1penny
+description: Build trading and financial charts with PennyChart (@1penny/chart) — candlesticks and 17 other chart types, 134 indicators, drawing tools, live exchange data, orders and positions on the chart, signals and trade zones, alerts, replay, a full trading widget. Use when a project imports @1penny/*, or when asked to add a price, candlestick or trading chart to a web app (vanilla TS/JS, React, Vue, Svelte).
+---
+
+# PennyChart
+
+PennyChart draws trading charts in TypeScript, with no runtime dependencies:
+on Canvas 2D by default, or with the series, indicators and panes on WebGL 2
+(`renderer: 'webgl'`, or `'auto'` where the GPU is a real one). One package,
+`@1penny/chart`, holds both the chart engine and a complete trading UI
+around it.
+
+## Pick the entry point
+
+| You need | Use |
+|---|---|
+| A full trading UI: toolbar, drawing sidebar, indicator legend, settings, status bar | `ChartWidget` from `@1penny/chart/widget` |
+| A chart inside your own UI | `Chart` from `@1penny/chart` |
+| React, Vue or Svelte components | `@1penny/react`, `@1penny/vue`, `@1penny/svelte` |
+| Strategy backtests and risk metrics | `@1penny/analytics` |
+
+`widget.getChart()` returns the `Chart` inside a widget, so everything below
+also works on a widget.
+
+## Rules that avoid most bugs
+
+1. **Give the container a size** (width and height) before creating the chart.
+   The chart follows later size changes by itself.
+2. **Browser only.** In SSR frameworks (Next, Nuxt, SvelteKit) create the chart
+   in `useEffect` / `onMounted` / `onMount`, importing it there with
+   `await import('@1penny/chart')` if the module is also loaded on the server.
+3. **Call `destroy()`** when the element goes away (component unmount).
+4. **Bars** are `{ time, open, high, low, close, volume }`, ascending by time.
+   `time` may be milliseconds or seconds (values up to 1e12 are read as seconds).
+   Keep one unit per series.
+5. **Indicator ids are short** — `'rsi'`, `'bb'`, `'psar'`, `'stochastic'` — see
+   [references/indicators.md](references/indicators.md). The types know them
+   too: `BuiltInIndicators` (from `@1penny/chart`) has each one's inputs
+   with their defaults and the keys of its lines, and a misspelt input fails
+   the type check. `addIndicator` returns an instance id (`null` if the feature or
+   id is turned off); later calls take that instance id, not the indicator id.
+6. **Live updates:** `appendBar` for a new bar, `updateLastBar` for the forming
+   one, `updateBar` for a closed bar the feed corrects (same `time`, anywhere
+   in the series; `false` when no loaded bar has it). Never `setData` on every
+   tick, or to fix a bar: it resets the view and recomputes everything. The
+   close of a new or forming bar is the live price: the price line, the alerts
+   and the orders' P&L follow it (a feed with only a price, no bars:
+   `setCurrentPrice`); a correction is not. A connected feed corrects a bar by
+   sending it again with `closed: true`.
+7. Read values with `chart.getIndicatorOutput(instanceId)?.series[i]` (an object
+   keyed by the indicator's line keys), not by guessing from the drawing.
+8. **Look names up when the PennyChart MCP server is connected** (tools named
+   `get_indicator`, `validate_options`…, from `@1penny/mcp`): an
+   indicator's params and line keys with `get_indicator`, drawing types with
+   `list_drawing_tools`, the charts that are not a trading chart with
+   `list_finance_charts`, how to write an indicator of your own with
+   `custom_indicator`, and an options object through `validate_options`
+   before it goes to `new ChartWidget`, `new Chart` or a finance chart. Not connected? It is
+   one command: `claude mcp add 1penny -- npx -y @1penny/mcp`.
+9. **The time zone is `timeZone`**, as in `Intl.DateTimeFormat`: the option,
+   `setTimeZone` / `getEffectiveTimeZone`, `SymbolInfo.timeZone` and
+   `MarketConfig.timeZone`. `setTimeZone('exchange')` shows the symbol's zone,
+   else its market's. In a `ChartWidget`, set it as a Chart Setting,
+   `widget.setSettings({ timezone: 'exchange' })` (spelt `timezone` there), so
+   the widget's clock, its settings dialog and what it keeps follow. From 2.0
+   that is the only other spelling: `setTimezone`, `getTimezone`,
+   `EXCHANGE_TIMEZONE` and `SymbolInfo.timezone` are gone, and a symbol that
+   gives `timezone` has no zone. The 2h–12h,
+   1D, 1W and 1M bars the library builds start at the exchange's midnight: from
+   a feed's `supportedTimeframes`, at the zone its `resolveSymbol` names (not
+   `setMarket`'s); from the widget's `setData`, at the symbol's zone, else the
+   market's. Bars your own code builds take
+   `timeframeBucketStart(t, tf, { timeZone })` to match.
+
+## Quick start: the widget with live data
+
+```ts
+import { ChartWidget } from '@1penny/chart/widget';
+import { BinanceAdapter } from '@1penny/chart';
+
+const widget = new ChartWidget(document.getElementById('chart')!, {
+  symbol: 'BTCUSDT',
+  timeframe: '5m',
+  theme: 'dark',
+  adapter: new BinanceAdapter(),
+  locale: 'en', // 'vi' too; 28 more from '@1penny/chart/widget/locales' (`messages`)
+  // Once it is built, in a microtask after `new ChartWidget()` returns: `widget` is set by then.
+  onReady: (chart) => {
+    chart.addIndicator('ema', { period: 50 });
+    chart.addIndicator('rsi', { period: 14 });
+  },
+});
+
+// A widget made without `adapter` connects nowhere: give it bars with widget.setData(bars).
+// Later, when the page goes away:
+widget.destroy();
+```
+
+## Quick start: a chart with your own data
+
+```ts
+import { Chart, type OHLCBar } from '@1penny/chart';
+
+const chart = new Chart(document.getElementById('chart')!, {
+  chartType: 'candlestick',
+  theme: 'dark',
+  features: { indicators: true, drawings: true, volume: true },
+});
+
+const bars: OHLCBar[] = await fetch('/api/bars?symbol=AAPL&tf=1d').then((r) => r.json());
+chart.setData(bars);
+
+// A new bar opens, then the forming bar ticks:
+const last = bars[bars.length - 1];
+chart.appendBar({ time: last.time + 86_400_000, open: last.close, high: last.close, low: last.close, close: last.close, volume: 0 });
+chart.updateLastBar({ ...chart.getData()[chart.getData().length - 1], close: last.close + 1.25 });
+```
+
+For a live feed, give the chart an adapter instead and it handles history,
+streaming and reconnects: `chart.connect({ adapter, symbol, timeframe })`.
+For a source of your own, write a `DataFeed` (`getBars` and `subscribeBars`,
+Promise-based) and pass `{ feed }` instead; bars your app pushes go through a
+`ManualFeed`. One feed serves many charts, a widget or a grid takes one as `feed`.
+Built-in adapters: `BinanceAdapter`, `CoinbaseAdapter`, `BybitAdapter`,
+`KrakenAdapter`, `UpbitAdapter` (Korea; a browser needs its own proxy as
+`restBase`), `MockAdapter` (random data for demos), and two bases for your
+own feeds — `WebSocketAdapter` and `PollingAdapter` (see
+[references/recipes.md](references/recipes.md)).
+
+## Indicators
+
+```ts
+import { Chart, indicatorSource } from '@1penny/chart';
+
+declare const chart: Chart;
+
+const ema = chart.addIndicator('ema', { period: 21 })!;              // on the price pane
+const rsi = chart.addIndicator('rsi', { period: 14 }, 'bottom')!;    // a pane of its own
+
+chart.updateIndicator(ema, { period: 34 });          // change inputs
+chart.updateIndicator(ema, { source: 'hlc3' });      // compute from another price
+chart.setIndicatorLevels(rsi, [20, 50, 80]);         // RSI's reference lines (null = defaults)
+chart.updateIndicatorStyle(rsi, { colors: ['#f2a93b'], lineWidths: [2] });
+chart.setIndicatorVisible(ema, false);
+// Only on some intervals: off on minute charts, 1h to 4h. Read against the
+// connected stream's interval; for bars from setData, tell the chart theirs.
+chart.setIndicatorIntervals(ema, { minutes: false, hours: [1, 4] }); // null = all
+chart.setDataTimeframe('1h');
+
+// An indicator on another indicator's line: an SMA of RSI is drawn in RSI's pane.
+const smoothed = chart.addIndicator('sma', { period: 9, source: indicatorSource(rsi, 'value') });
+
+// Values at the latest bar, by line key:
+const series = chart.getIndicatorOutput(rsi)?.series ?? [];
+const latestRsi = series[series.length - 1]?.value;
+
+chart.removeIndicator(rsi); // also removes `smoothed`, which reads from it
+chart.removeIndicators(chart.getActiveIndicators().map((i) => i.instanceId)); // several, one undo step
+chart.removeAll('indicators'); // or 'drawings', or 'all': everything of that kind, one undo step
+```
+
+- Panel indicators may share a pane: `addIndicator('stochastic', {}, 'bottom', { pane: rsi })`.
+- The legend shows each line's latest value; tag it on the axis too with
+  `features.indicatorValueLabels: true` (off by default).
+- Price axis tags that would cover one another (last price, bid/ask, high/low,
+  limits, orders, positions) are moved apart, the last price's staying on its line
+  (`features.alignAxisLabels`, on by default; `chart.setAxisLabelsAligned(false)`
+  keeps each tag on its line).
+- `vwap` starts again each trading day (`anchor: 'session'`, from midnight in the
+  exchange's zone: the symbol's `timeZone`, else the market's, else UTC). Pass
+  `{ anchor: 'week' }` or `{ anchor: 'month' }` on daily bars, where a session's
+  VWAP is just each bar's typical price; `{ anchor: 'all' }` averages every bar
+  loaded and moves when older history is paged in.
+- Custom indicators: `defineIndicator({ id, name, inputs, plots, calculate({ bars, inputs, ta }) })`
+  returns one to `chart.registerIndicator(...)`; `ta` has the sums (`ema`, `rsi`, `macd`, `atr`,
+  `bollinger`, `crossover`…) and `ta.indicator(id, bars, params)` runs any built-in. For one that updates tick by tick or draws its own way, extend
+  `IndicatorBase` and declare `plots` — see [references/recipes.md](references/recipes.md).
+  A `category` in the descriptor (`'oscillators'`, `'volume'`…) files it under that
+  group of ChartWidget's Indicators dialog; `{ id, label }` is a group of your own,
+  listed before the built-in kinds, that keeps your app's indicators together. One that groups bars by day reads the
+  exchange's zone as `config.exchangeTimeZone`; one that reads no zone can say
+  `readsExchangeTimeZone: false`, so a new zone leaves it as it is.
+
+## Drawings, alerts and orders
+
+```ts
+import type { Chart } from '@1penny/chart';
+
+declare const chart: Chart;
+declare const t1: number, t2: number; // bar times
+
+chart.setDrawingTool('fibRetracement'); // the user clicks the points; null cancels
+const line = chart.addDrawing({
+  type: 'trendLine',
+  anchors: [{ time: t1, price: 61_800 }, { time: t2, price: 63_400 }],
+  options: { extendRight: true, showPriceRange: true, rightEnd: 'arrow' }, // each tool's own: chart.getDrawingOptionDefs(type)
+  intervals: { minutes: false },         // not drawn on minute charts; unset: every interval
+});
+if (line && chart.canAddDrawingAlert(line)) chart.addDrawingAlert(line, { condition: 'crossingDown' });
+chart.addAlert(65_000, 'crossingUp', 'BTC above 65k'); // checked on each live price: a stream's, updateLastBar, appendBar, setCurrentPrice
+chart.on('alertTriggered', (e) => console.log(e.payload.message));
+chart.setPositions([{ id: 'p1', side: 'buy', entryPrice: 62_500, quantity: 0.5, stopLoss: 61_000, takeProfit: 66_000 }]);
+chart.on('positionModify', (e) => console.log('stop or target dragged', e.payload));
+chart.modifyPositionIntent({ positionId: 'p1', trailingStop: 400 }); // the stop trails the price by 400 (tag: TSL); null ends it. The paper account moves it; an order takes trailingStop too
+```
+
+76 drawing tools; each keeps its own settings (`setDrawingOptions`, `updateDrawing`),
+and drawings can be named (`updateDrawing(id, { name })`, what the object tree lists),
+grouped (`groupDrawings`), reordered (`moveDrawing` with a step or a place, 0 the bottom), erased
+(`setEraserMode`), and copied to another chart of the page (`copyDrawings`, then
+`pasteDrawings` there; `canPasteDrawings()` says whether there is something to paste).
+A selected drawing (or one being drawn) marks its span on the axes, its ends labelled in its
+colour (`features.drawingAxisSpans: false` turns that off). What the pointer looks like is
+`crosshair.cursor` / `setCrosshairCursor`: `'cross'`, `'dot'`, or `'arrow'` (no lines, the axis
+labels still follow); on `ChartWidget` it is a Chart Setting, `widget.setCrosshairCursor(kind)`.
+A drawing kept to some intervals (`intervals`, the rules of `IndicatorIntervals`; change them
+with `updateDrawing(id, { intervals })`, null for all) shows only there: `isDrawingShown(id)`.
+Trend lines, rays and extended lines take a middle point and stats (`showPriceRange`,
+`showBarsRange`, `showDateRange`, `showAngle`, `alwaysShowStats`, `statsPosition`).
+`riskReward` is a Long/Short position sized from `accountSize` and `risk`, which plays the trade out over
+the bars in its span (`showOutcome: false` turns that off); `positionLevels(drawing)`
+(from `@1penny/chart`) reads it as a trade (`side`, `entry`, `stopLoss`, `takeProfit`, an
+unrounded `quantity` above zero with its `quantityDecimals`, `riskAmount`, `rewardAmount`,
+`riskReward`), or `null` (another drawing, no risk set, a stop on the entry): work an order out
+from that, not from its anchors, and round the quantity down to the broker's lot. In the widget the
+selected drawing offers **Create order**, which opens the order ticket filled with those levels
+(side, entry as the price, stop-loss, take-profit and the quantity taken to the drawing's decimals);
+nothing is sent until Place.
+Text tools (`text`, `note`, `callout`, `priceLabel`, `arrowMark`) take a text style:
+`style: { text: 'line one\nline two', fontSize, bold, italic, textColor }`, and a text, a note
+or a callout also `textAlign` ('left' | 'center' | 'right'), `textBackground` (in `fillColor`),
+`textBorder` (in `borderColor`) and `textWrap` (px; 0: only at the text's own breaks).
+Lines and boxes (`trendLine`, `ray`, `extendedLine`, `infoLine`, `trendAngle`, `arrow`,
+`horizontalLine`, `horizontalRay`, `verticalLine`, `rectangle`) take `style.text` too, placed with
+`textAlign` (end or middle) and `textVAlign` ('top' | 'middle' | 'bottom'); don't add a separate
+`text` drawing beside a line to label it. `showPrice: false` hides a horizontal line's price,
+`showTime: true` shows a vertical line's time, and Fibonacci tools take `trendLine` and `oneColor`.
+`signpost` and `balloon` mark a bar with a text; `anchoredText` and `anchoredNote` stay at a place on the
+screen (anchors are shares of the plot, `{ time: 0.5, price: 0.25 }` halfway across, a quarter down).
+In the widget a text tool's words are typed in place (drawn, or double-clicked), and so are a line's or a
+rectangle's (the Text button over the selection, or a double-click on the words); `chart.getDrawingTextRect(id)`
+says where a drawing's words are, and `getDrawingTextSize(id)` their size, for an editor of your own. The widget grows on wide screens (`ui.scale: 'auto'`).
+The widget's magnet starts off; `setDrawingMagnetMode('weak' | 'strong')` turns it on. `setTradingVisible(false)` hides the
+positions, orders and fills, `setTradingLocked(true)` stops their lines being dragged, and `setIndicatorsVisible(ids, false)`
+hides several indicators in one undo step.
+Editing is built in, so don't wire it yourself: the magnet also pulls dragged handles and moved
+drawings, Ctrl/⌘ held turns it over, Shift keeps lines at 45° steps, the arrow keys move the
+selection (Shift: ten), and Ctrl/⌘-drag on a drawing drags out a copy.
+A drawing can sit on an indicator pane: `addDrawing({ …, paneId })` with an id from
+`getIndicatorPanes()`, its anchors' prices then the pane's values (an RSI level at 70). One
+begun with the pointer on a pane goes there by itself; `paneId` unset is the price pane.
+Price-only tools (`anchoredVWAP`, `volumeProfileRange`, `riskReward`) and side or folded
+panes take none, and a pane's drawing takes no price alert.
+A tool of your own (`registerPlugin({ kind: 'drawing', plugin })`) is named by its
+`descriptor.type`, and that name types as a `DrawingToolType` wherever a tool's is taken
+(`setDrawingTool('targetLine')`, `addDrawing`); `BuiltInDrawingToolType` lists the built-in ones.
+Positions and orders get a tag at the right end of their lines (quantity, side, open profit;
+what a stop or a target would make) with × and ⇅ (`setTradingConfig({ lineButtons })`), and
+their prices on the axis; a press on an order's, a stop's or a target's tag drags its line.
+
+## Signals, trades and replay
+
+```ts
+import type { Chart } from '@1penny/chart';
+
+declare const chart: Chart;
+declare const t1: number, t2: number; // bar times
+
+chart.setSignalMarkers([{ id: 's1', time: t1, price: 62_000, direction: 'long', confidence: 0.8, source: 'my-strategy' }]);
+chart.setTradeZones([{ id: 'z1', direction: 'long', entryTime: t1, entryPrice: 62_000, exitTime: t2, exitPrice: 63_500 }]);
+
+// Marks: what happened at a time (news, earnings, a dividend), a badge at the foot of the price pane.
+chart.setMarks([{ id: 'q3', time: t1, kind: 'earnings', title: 'Q3 earnings', text: 'EPS 1.42 vs 1.31 expected' }]);
+chart.addMark({ time: t2, kind: 'news', title: 'A headline', url: 'https://example.com/story' });
+chart.on('markClick', (e) => console.info(e.payload.marks.map((m) => m.title)));
+
+// Replay from a time, only the replayed bars on the chart, the whole run in about 3.5 s.
+// Markers and zones appear as the replay reaches them.
+chart.replayStart({ startTime: t1, hideHistory: true, duration: 3500 });
+chart.on('replayComplete', () => chart.replayStop());   // every bar and mark back
+```
+
+Marks (`setMarks`, `addMark`, `removeMark`, `getMarks`, `clearMarks`; `kind` is `news`,
+`earnings`, `dividend`, `split` or `event`) are the feed's, never in `saveState`: set them
+again after a load. ChartWidget marks the symbol's headlines by itself when it has a news
+source (`news`, or the adapter's `fetchNews`; `newsMarks: false` stops it) and opens a
+mark's link on a click; `features: { marks: false }` hides every mark.
+
+`replayPause`, `replayResume`, `replaySeekToTime` and `replaySeekToBar` steer it;
+`revealMarks: false` shows every mark from the start. `animate: true` grows each
+bar over its time, and `step: 'auto'` (or `'1m'`) shapes it with finer bars the
+chart fetches through the connected feed for the bars it is about to play; never
+fetch the newest finer bars yourself, they are not the window replayed. ChartWidget
+does both by default (`replayStep`, `replayAnimate: false` change it). A replay is a time over the
+live series: `setData`, a new symbol or timeframe, older bars and the extended hours
+carry it over to the same time (it waits while a new series loads), so its indices
+change with the bars. Keep a position by time (`getReplayProgress().until`, then
+`replaySeekToTime`), and call `replayStop()` first to end it on a new series. ChartWidget's replay
+bar shows the replayed date, plays at speeds of 0.1× to 50× (1× is one chart bar a second), and takes
+Shift+←/→ and Space; don't build a second panel over it.
+
+## Saving layouts
+
+```ts
+import type { Chart } from '@1penny/chart';
+
+declare const chart: Chart;
+
+const json = chart.saveState();           // chart type, theme, drawings, indicators, alerts
+if (json) localStorage.setItem('layout', json);
+chart.loadState(localStorage.getItem('layout') ?? '{}');
+chart.setAutoSave('layout', 1500);        // or keep it saved as it changes
+```
+
+Saved indicators keep their inputs, sources, panes, colours, visibility and levels.
+`saveState` holds none of the overlays (volume and market profiles, swing
+markers, session shading, prior-period levels), the crosshair or the time zone.
+In a `ChartWidget` those are its Chart Settings, with an API and a store of their own:
+
+```ts
+import { ChartWidget } from '@1penny/chart/widget';
+
+const widget = new ChartWidget(document.getElementById('chart')!, {
+  symbol: 'BTCUSDT',
+  persistSettings: true,                 // kept in this browser, back on the next visit
+});
+widget.setSettings({ timezone: 'exchange', volumeProfileVisible: true });  // checked, no undo step
+const settings = widget.getSettings();   // a copy: every switch, the scale, the zone, what you set on getChart() too
+const stop = widget.onSettingsChange((next) => console.log(next.timezone)); // each change; the dialog's once, at OK
+stop();
+```
+
+Named layouts (`layouts`) and share links (`shareUrl`, `exportState`) carry the
+Chart Settings too, but not the viewer's time zone and number format;
+`persistLayouts` (per symbol) carries only a chart type's own settings. A kept
+setting wins over `chartOptions`, and Reset in the dialog goes back to
+`chartOptions`. With `persistSettings` on, what `setSettings` sets, and what an
+opened layout brings, is kept as the user's choice too: to force a value, set
+it on every start; setting it back to the `chartOptions` value stops it being
+kept. An opened share link's settings show for that visit only, are not kept
+and call no `onSettingsChange` listener.
+
+## Events
+
+`chart.on(event, (e) => …)` — the payload is `e.payload`.
+
+| Event | Payload |
+|---|---|
+| `crosshairMove` | `{ point, bar, barIndex, time, prevClose }` (also over indicator panes; `time` as the axis dates the bar, a Renko brick by the bar it was finished on) |
+| `crosshairLeave` | — |
+| `crosshairSync` | `{ barIndex, bar, time, prevClose }`: another chart's crosshair mirrored here (`setCrosshairTime`, a grid); `barIndex: null` when it goes |
+| `barClick` | `{ bar, barIndex, point }` |
+| `visibleRangeChange` | `{ from, to }` bar indices |
+| `dataUpdate` | by `kind`: `'bars'` (`{ length }`: `setData`, a bar appended, by hand or by the stream; not a tick), `'correction'` (`{ time, index }`: `updateBar`, or a feed's closed bar for an older time), `'alert'`, `'bracket'`, `'connection'`, `'error'` |
+| `chartTypeChange` | `{ type, previous }` (`getChartType()` reads it back) |
+| `indicatorAdd` / `indicatorRemove` | `{ instanceId, id }` |
+| `indicatorChange` | `{ instanceId, change }`: `'visible' \| 'style' \| 'levels' \| 'params' \| 'pane'` |
+| `indicatorUpdate` | `{ from }`: values recomputed from that bar on (once per update) |
+| `drawingCreate` | `{ id, type, drawing }` (also when an undo brings a drawing back) |
+| `drawingUpdate`, `drawingRemove` | `{ id }` |
+| `drawingDoubleClick` | `{ id, x, y }` |
+| `drawingContextMenu` | `{ id, x, y }`: a drawing was right-clicked |
+| `toolModeChange` | `{ eraser }` or `{ zoomArea }` |
+| `orderModify`, `positionModify` | the object |
+| `replayStep` | `{ barIndex, time, stepTime, until, total, cause }`: a replay step (`stepTime`: when the step shown opened, for a date readout; `cause`: `'play'`, `'seek'` or `'series'`, a carry-over to new bars) |
+| `replayState` | `{ state }`: `'playing' \| 'paused' \| 'stopped'` |
+| `replayComplete` | `{ barIndex, time }`: the replay reached its last bar |
+| `replayStepsLoad` | `{ state, step, count }`: finer bars for a replay's `step` loading, loaded, at their end or failed |
+| `styleChange` | `{ layer }`: `'host'` or `'user'` overrides changed |
+| `rendererChange` | `{ renderer, reason? }`: WebGL fell back to Canvas 2D, or came back |
+| `legendResize` | `{ bottom }`: the legend was drawn taller or shorter; labels of your own stacked under it move to `getLegendBottom()`; give their size with `chart.setLegendStack({ width, height })` (from the plot's left edge and that bottom) and drawing labels keep clear of them |
+
+## Theming
+
+`theme: 'dark' | 'light'` or a `Theme` object (`{ ...DARK_THEME, candleUp: '#1fa874' }`);
+`chart.setTheme(...)` at runtime. Numbers follow `numberLocale` (`'en-US'`, `'vi-VN'` …).
+The chart's own text (axes, tags, crosshair pills) is in the system's sans face; over any theme: `font: { family: MONO_FONT_FAMILY, sizeSmall: 12 }` (a monospaced face)
+or `chart.setFont(...)` (`null`: the theme's), and words written on drawings in `font.textFamily` (the system sans when unset); the legend takes the face at its own size (`chart.setLegend({ fontSize })`),
+and in the widget its face and size come from `ui.font`. Room around the bars: `density: 'comfortable'` (the default:
+golden bars, 8 slots past the newest bar, wider price margins) or `'compact'` (the chart as before 2.0: classic bars, 5
+slots, tighter margins); `chart.setDensity`. One part alone: `barLayout: 'golden'` (body φ⁻¹ of the slot) or `'classic'`
+(a 2 px gap), `chart.setBarLayout`; `rightMargin`. In the widget `ui: { density }` sets its chart too: `'comfortable'`
+(default), `'classic'` (the widget as before 2.0, to the pixel), `'compact'` (smaller controls, classic bars),
+`'spacious'`, `'airy'` (spacious with sans figures).
+The legend's rows sit on a see-through ground (`setLegend({ ground: false })`
+leaves it out; the widget's indicator rows: the CSS variable `--1p-legend-ground`).
+
+One part of the look apart from the theme: `chart.applyOverrides({ 'grid.vertical.visible': false,
+'series.candlestick.upColor': '#26a69a' })` (every key and its kind in
+[references/style-keys.md](references/style-keys.md); `null` takes one away; `overrides` in the
+options and the React/Vue/Svelte props). Candles: `series.candlestick.upColor` / `downColor` colour
+the bodies and the wicks with them; `wickUpColor` / `wickDownColor` part the wicks from them.
+`getTheme()` is the theme as set; what is drawn reads back from `getStyleValue(key)`. Orders, positions, signal markers, trade zones and
+drawing handles take keys too (`trading.buyColor`, `markers.longColor`, `tradeZones.activeColor`,
+`drawings.handleColor`). Each indicator plot's dash and visibility:
+`updateIndicatorStyle(id, { plots: { signal: { lineStyle: 'dashed' } } })`. The widget's Settings
+edit these keys on the user's layer: the Symbol tab the colours of the chart type on view, the
+Appearance and Scales tabs the chart's parts, the Trading tab the orders', markers' and zones'
+colours (Auto until one is picked); Cancel puts a session back, OK keeps it as one undo step.
+
+The widget's parts: `features: { 'toolbar.replay': false, hotkeys: false }` and
+`widget.setFeatures(patch)` at runtime (names in `WIDGET_FEATURES`; no dot = a whole capability
+everywhere, dotted = one place; a part shows while all of its switches are on, so
+`isFeatureOn('toolbar.replay')` stays `true` with `replay: false`). They hide the widget's UI only,
+and never add a part: the depth ladder and the watchlist come from their options
+(`depthLadder: true`, `watchlist: true`), and `features: { depthLadder: true }` alone makes no ladder.
+To stop drawing, trading or zoom on the chart, use `chartOptions.features`. The widget's `symbols` (and
+`setSymbols`) take tickers or `SymbolInfo` (`description`, `type`, `exchange`, `logo`, `last`, `changePercent`): the symbol search then
+opens named, with kind tabs and an exchange filter (recipe in [references/recipes.md](references/recipes.md)). The dock's panels
+(watchlist, alerts, depth ladder…) start shut: `widget.openPanel('watchlist')`. Your own parts: `addToolbarButton`,
+`addToolbarDropdown`, `addSidebarButton`, `addStatusBarItem`, `getSlot('chart')`, `addHotkey`, a page in the
+dock with `addDockPage({ id, label, icon, element })` (the `onPanelChange` option says which panel is open), and
+the `chartMenuItems` / `drawingMenuItems` / `indicatorMenuItems` options. Style the widget with your
+own CSS through `--1p-*` variables and `[data-pcw-part~="name"]` (stable through 1.x).
+
+## When something looks wrong
+
+| Symptom | Check |
+|---|---|
+| Blank chart | The container has no height (check its computed size) |
+| Garbled candles, wrong dates on the axis | Bars not ascending by time: `setData` does not sort them |
+| Dates in 1970 | `time` in seconds treated as ms (or the reverse) mixed in one series |
+| `addIndicator` returns `null` | `features.indicators` is off, or `features.indicatorIds` leaves it out |
+| Indicator line missing at the start | Warm-up: no value until its period has enough bars |
+| Chart stutters on a fast feed | `setData` called per tick instead of `updateLastBar` / `appendBar` |
+| View jumps back to the newest bar when the feed fixes a closed bar | `setData` used for it: call `updateBar(bar)` (same `time`) |
+| A React/Vue/Svelte chart shows Binance bars before yours | Pass `data` at mount, or `stream={false}` |
+
+## References
+
+- [references/indicators.md](references/indicators.md) — every built-in indicator: id, default params, lines, levels, source support (generated from the code).
+- [references/style-keys.md](references/style-keys.md) — every style key for `applyOverrides` and its kind (generated from the code).
+- [references/migrate-from-tradingview.md](references/migrate-from-tradingview.md) — moving an app from TradingView's charting library or Lightweight Charts: the MCP tools that map its names and options, its datafeed kept as it is (`feedFromJsApi`, `udfFeed`), and what differs.
+- [references/recipes.md](references/recipes.md) — worked examples: custom data feeds, frameworks, indicators on indicators, a custom indicator, indicators on a long history computed in a worker (`indicatorWorker`), multi-chart layouts.
+- Docs site: https://github.com/ducbka02/1penny · API: https://github.com/ducbka02/1penny

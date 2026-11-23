@@ -1,0 +1,45 @@
+import type { DrawingState, Point, ViewportState } from '@1penny/commons';
+import { DrawingBase } from '../DrawingBase.js';
+import { fillArrowHead } from './lineDecor.js';
+import { drawLineText, TextHitCache } from './lineText.js';
+
+export class ArrowTool extends DrawingBase {
+  descriptor = { type: 'arrow' as const, name: 'Arrow', requiredAnchors: 2, text: true };
+
+  render(ctx: CanvasRenderingContext2D, state: DrawingState, viewport: ViewportState, selected: boolean): void {
+    // Words not drawn this time (no text, the line off the plot or its points together) are not there to click.
+    this.texts.set(state.id, null);
+    if (state.anchors.length < 2) return;
+    const p1 = this.anchorToPixel(state.anchors[0], viewport);
+    const p2 = this.anchorToPixel(state.anchors[1], viewport);
+
+    this.applyLineStyle(ctx, state.style);
+    ctx.beginPath();
+    ctx.moveTo(p1.x, p1.y);
+    ctx.lineTo(p2.x, p2.y);
+    ctx.stroke();
+    fillArrowHead(ctx, p1, p2, state.style.color, state.style.lineWidth);
+    this.resetLineStyle(ctx);
+    this.texts.set(state.id, drawLineText(ctx, state.style, this.anchorToPixel(state.anchors[0], viewport), this.anchorToPixel(state.anchors[1], viewport), viewport.chartRect));
+    if (selected) this.renderAnchorHandles(ctx, state, viewport);
+  }
+
+  /** Its text's box as last drawn: a click on the words picks it. */
+  private texts = new TextHitCache();
+
+  /** Where its words were drawn: the toolbar over a selection keeps clear of them. */
+  textBox(state: DrawingState): { x: number; y: number; width: number; height: number } | null {
+    return this.texts.bounds(state.id);
+  }
+
+  hitTest(point: Point, state: DrawingState, viewport: ViewportState, tolerance: number): boolean {
+    return this.texts.hit(state.id, point, tolerance) || this.hitShape(point, state, viewport, tolerance);
+  }
+
+  private hitShape(point: Point, state: DrawingState, viewport: ViewportState, tolerance: number): boolean {
+    if (state.anchors.length < 2) return false;
+    const p1 = this.anchorToPixel(state.anchors[0], viewport);
+    const p2 = this.anchorToPixel(state.anchors[1], viewport);
+    return this.distanceToLine(point, p1, p2) <= tolerance;
+  }
+}

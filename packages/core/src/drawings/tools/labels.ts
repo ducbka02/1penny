@@ -1,0 +1,420 @@
+import type { DrawingState, Theme, ViewportState } from '@1penny/commons';
+import { MAX_PRICE_DECIMALS, formatPrice, priceTagText, withAlpha } from '@1penny/commons';
+import { resolveBarIndex } from '../../viewport/ScaleMapping.js';
+import { drawingLook, extendExtent, keepOnPlot, labelInk, roleFont, setDrawingLook } from '../drawingLook.js';
+
+/** Shared label helpers for the measuring / pattern drawing tools. */
+
+const DEFAULT_HALO = 'rgba(12, 16, 22, 0.85)';
+
+/** The chart's background, around drawing text so it stays legible over bars and grid. */
+let labelHalo = DEFAULT_HALO;
+
+/**
+ * The theme the next drawing pass renders in: its background for the text
+ * halo, its font family for the text. Set by the drawing renderer right
+ * before each (synchronous) pass; none puts the defaults back.
+ */
+export function setDrawingTheme(theme: (Pick<Theme, 'background' | 'style'> & Partial<Pick<Theme, 'text' | 'font'>>) | null): void {
+  labelHalo = theme?.background ?? DEFAULT_HALO;
+  setDrawingLook(theme);
+}
+
+/** The fill of a selected drawing's handles: the chart's background, or the `drawings.handleColor` key's. */
+export function drawingHandleFill(): string {
+  return drawingLook().handleFill;
+}
+
+/** The family drawing figures are set in: the theme's. */
+export function drawingFontFamily(): string {
+  return drawingLook().figures;
+}
+
+/** Text in drawings: the theme's type at `size` px (not the browser's default sans). */
+export function drawingFont(size: number, weight?: 'bold'): string {
+  return `${weight ? `${weight} ` : ''}${size}px ${drawingLook().figures}`;
+}
+
+/**
+ * `fillText` with a halo of the chart's background behind the glyphs: the
+ * drawing pass's (`setDrawingTheme`), or `halo` for text outside one.
+ */
+export function fillTextWithHalo(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, halo = labelHalo): void {
+  ctx.save();
+  ctx.lineJoin = 'round';
+  // Wide and solid enough that a dashed guide or a candle under the text doesn't show through.
+  ctx.lineWidth = HALO_WIDTH;
+  ctx.strokeStyle = halo;
+  ctx.setLineDash([]);
+  ctx.strokeText(text, x, y);
+  ctx.restore();
+  ctx.fillText(text, x, y);
+}
+
+/** The width of the halo around drawing text, px. */
+const HALO_WIDTH = 4;
+
+/** A level label's font size (px): the look's label size. */
+const levelLabelSize = (): number => drawingLook().sizes.label;
+/** How far a level label starts right of where its line starts (px). */
+const LEVEL_LABEL_INSET = 4;
+/** How far a level label sits above its line, or below it (px). */
+const LEVEL_LABEL_GAP = 3;
+
+/** A box on the plot (CSS px) that drawing labels keep clear of. */
+export interface LabelKeepOut {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * What the next drawing pass's labels keep clear of: the legend's rows and
+ * what a host stacks under them. Set by the drawing renderer right before
+ * each (synchronous) pass; none clears it.
+ */
+let keepOut: readonly LabelKeepOut[] = [];
+/**
+ * The labels drawn so far in the pass, of every drawing: a later one keeps
+ * clear of them as of the legend, so two positions' tags or two lines'
+ * labels moved to one spot don't print over each other.
+ */
+let taken: LabelKeepOut[] = [];
+/** Whether a pass is open (labels are kept track of only within one). */
+let passOpen = false;
+
+/** Start a pass with the boxes to keep clear of; null ends it. Either forgets the labels drawn. */
+export function setDrawingKeepOut(boxes: readonly LabelKeepOut[] | null): void {
+  keepOut = boxes ?? [];
+  taken = [];
+  passOpen = boxes !== null;
+}
+
+/** Note a label drawn from (`left`, `top`) to (`right`, `bottom`), for the labels after it in the pass. */
+export function takeLabelBox(left: number, top: number, right: number, bottom: number): void {
+  if (passOpen) taken.push({ x: left, y: top, width: right - left, height: bottom - top });
+}
+
+function crosses(k: LabelKeepOut, left: number, top: number, right: number, bottom: number): boolean {
+  return right > k.x && left < k.x + k.width && bottom > k.y && top < k.y + k.height;
+}
+
+/** Whether the box from (`left`, `top`) to (`right`, `bottom`) runs into any kept-out box. */
+export function overlapsKeepOut(left: number, top: number, right: number, bottom: number): boolean {
+  return keepOut.some((k) => crosses(k, left, top, right, bottom));
+}
+
+/** Whether the box runs into a kept-out box or a label drawn before it in the pass. */
+export function labelBlocked(left: number, top: number, right: number, bottom: number): boolean {
+  return overlapsKeepOut(left, top, right, bottom) || taken.some((k) => crosses(k, left, top, right, bottom));
+}
+
+/**
+ * The lowest foot of the kept-out boxes and the labels drawn beside the span
+ * from `left` to `right`, all of them stacked as one: where a label under
+ * them starts. `top` when none is beside it.
+ */
+export function belowKeepOut(left: number, right: number, top: number): number {
+  let bottom = top;
+  for (const k of [...keepOut, ...taken]) {
+    if (right > k.x && left < k.x + k.width) bottom = Math.max(bottom, k.y + k.height);
+  }
+  return bottom;
+}
+
+/**
+ * The right edge of the kept-out boxes and labels across the row from `top`
+ * to `bottom`, where a label beside them on that row starts; null when
+ * nothing is on the row.
+ */
+export function rightOfKeepOut(top: number, bottom: number): number | null {
+  let right: number | null = null;
+  for (const k of [...keepOut, ...taken]) {
+    if (bottom > k.y && top < k.y + k.height) right = Math.max(right ?? k.x + k.width, k.x + k.width);
+  }
+  return right;
+}
+
+/** Where a level label goes: its anchor, alignment and baseline. */
+interface LevelLabelSpot {
+  x: number;
+  y: number;
+  align: CanvasTextAlign;
+  baseline: CanvasTextBaseline;
+  /** The label's box: its left edge and top. */
+  left: number;
+  top: number;
+}
+
+/** How far under its line a level label may go to clear the legend: two labels' height (px). */
+const levelLabelReach = (): number => 2 * levelLabelSize();
+
+/**
+ * A price level's text by its line at `y`: above its start at `x` when that
+ * is clear of the legend and of the labels drawn before it, else above its
+ * end at `right`, else below its start or its end; never above the plot's
+ * `plotTop`. With all of them covered (on a phone the legend spans the
+ * plot), under the legend's foot when that is near the line, else on the
+ * line at its right end, by the price axis, where that is clear; with that
+ * covered too, under the legend and the labels moved there before it. It sets its own alignment and
+ * baseline: the context keeps whatever the last text drawn on it left (the
+ * time axis leaves 'right', a Gann box 'right', a measure 'center'), and a
+ * label right-aligned at the plot's left edge is clipped down to its last
+ * glyph.
+ */
+export function fillLevelLabel(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, right = x, plotTop = -Infinity): void {
+  ctx.font = roleFont('label');
+  const width = ctx.measureText(text).width;
+  const spot = levelLabelSpot(x, right, y, width, plotTop);
+  ctx.textAlign = spot.align;
+  ctx.textBaseline = spot.baseline;
+  fillTextWithHalo(ctx, text, spot.x, spot.y);
+  takeLabelBox(spot.left, spot.top, spot.left + width, spot.top + levelLabelSize());
+}
+
+function levelLabelSpot(start: number, end: number, y: number, width: number, plotTop: number): LevelLabelSpot {
+  const left = start + LEVEL_LABEL_INSET;
+  // The end has a spot of its own only where the line is long enough to hold the label there.
+  const endLeft = end - LEVEL_LABEL_INSET - width;
+  const lefts = endLeft > left ? [left, endLeft] : [left];
+  const above = { top: y - LEVEL_LABEL_GAP - levelLabelSize(), bottom: y - LEVEL_LABEL_GAP };
+  const below = { top: y + LEVEL_LABEL_GAP, bottom: y + LEVEL_LABEL_GAP + levelLabelSize() };
+  for (const side of [above, below]) {
+    // Above the plot's top the label would be cut off.
+    if (side.top < plotTop) continue;
+    for (const l of lefts) {
+      if (!labelBlocked(l, side.top, l + width, side.bottom)) {
+        const isAbove = side === above;
+        return { x: l, y: isAbove ? side.bottom : side.top, align: 'left', baseline: isAbove ? 'bottom' : 'top', left: l, top: side.top };
+      }
+    }
+  }
+  const unders = lefts.map((l) => ({ l, top: belowKeepOut(l, l + width, y) + LEVEL_LABEL_GAP }));
+  const near = unders.find((u) => u.top - y <= levelLabelReach());
+  if (near) return { x: near.l, y: near.top, align: 'left', baseline: 'top', left: near.l, top: near.top };
+  // Far under the line it would read as the price of whatever is drawn there: on the line
+  // instead, by the price axis, through its halo, where nothing covers it there.
+  const axisSide = end - LEVEL_LABEL_INSET;
+  const onLine = { left: axisSide - width, top: y - levelLabelSize() / 2 };
+  if (!labelBlocked(onLine.left, onLine.top, axisSide, onLine.top + levelLabelSize())) {
+    return { x: axisSide, y, align: 'right', baseline: 'middle', ...onLine };
+  }
+  // The legend spans the plot there too (a phone): under it all, under the labels moved before it.
+  const nearest = unders.reduce((a, b) => (b.top < a.top ? b : a));
+  return { x: nearest.l, y: nearest.top, align: 'left', baseline: 'top', left: nearest.l, top: nearest.top };
+}
+
+
+/** A pill's height for the look's label size (18 px at 12 px type). */
+export function pillHeight(): number {
+  return Math.round(drawingLook().sizes.label * PILL_HEIGHT_RATIO);
+}
+const PILL_HEIGHT_RATIO = 1.5;
+/** A pill's corners and inner padding, px. */
+const PILL_RADIUS = 4;
+const PILL_PAD_X = 6;
+
+/** Width of a pill for `text` in the current font. */
+export function pillWidth(ctx: CanvasRenderingContext2D, text: string): number {
+  return Math.ceil(ctx.measureText(text).width) + 2 * PILL_PAD_X;
+}
+
+/**
+ * Text on a small rounded tag of `background`, left edge at `x`, centred on
+ * `centerY`, in the current font. Returns its width.
+ */
+export function drawPill(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  x: number,
+  centerY: number,
+  background: string,
+  color = labelInk(background),
+): number {
+  const width = pillWidth(ctx, text);
+  const height = pillHeight();
+  const top = Math.round(centerY - height / 2);
+  extendExtent(Math.round(x), top, width, height);
+  ctx.fillStyle = background;
+  ctx.beginPath();
+  if (typeof ctx.roundRect === 'function') ctx.roundRect(Math.round(x), top, width, height, PILL_RADIUS);
+  else ctx.rect(Math.round(x), top, width, height);
+  ctx.fill();
+  ctx.fillStyle = color;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, Math.round(x) + PILL_PAD_X, top + height / 2 + 0.5);
+  return width;
+}
+/** A label box's line height, as a share of its type size. */
+const LABEL_LINE_RATIO = 1.35;
+const LABEL_PAD_X = 8;
+const LABEL_PAD_Y = 5;
+const LABEL_RADIUS = 4;
+/** A label box's surface: the chart's background, nearly opaque, on a faint line of its text colour. */
+const LABEL_SURFACE_ALPHA = 0.94;
+const LABEL_EDGE_ALPHA = 0.16;
+
+const MS_MINUTE = 60_000;
+const MS_HOUR = 60 * MS_MINUTE;
+const MS_DAY = 24 * MS_HOUR;
+
+/**
+ * Decimals for prices around `ref`: 2 for most assets, 4 for prices between
+ * 1 and 10 (FX majors), and 4 significant digits below 1 (small caps).
+ */
+function priceDecimals(ref: number): number {
+  const abs = Math.abs(ref);
+  if (abs >= 10 || abs === 0) return 2;
+  if (abs >= 1) return 4;
+  return Math.min(MAX_PRICE_DECIMALS, Math.ceil(-Math.log10(abs)) + 3);
+}
+
+/** Decimals a percentage in a label shows. */
+const PERCENT_DECIMALS = 2;
+
+/**
+ * Price text as the chart writes a price (`viewport`): in its price format
+ * when it has one, else grouped in its number locale at the market's or the
+ * symbol's decimals, or at the precision of `ref` (defaults to the price
+ * itself) when neither sets them. Without a viewport, plain at that precision.
+ */
+export function formatDrawingPrice(price: number, ref = price, viewport?: ViewportState): string {
+  return viewport
+    ? priceTagText(price, viewport, viewport.pricePrecision ?? priceDecimals(ref))
+    : price.toFixed(priceDecimals(ref));
+}
+
+/** A percentage in the chart's number locale (`viewport`), e.g. "1.25". */
+export function formatPercent(pct: number, viewport?: ViewportState): string {
+  return viewport ? formatPrice(pct, PERCENT_DECIMALS, viewport.numberLocale ?? 'en-US') : pct.toFixed(PERCENT_DECIMALS);
+}
+
+/** Signed price change with its percentage of `from`, e.g. "+12.50 (+1.25%)". */
+export function formatPriceChange(from: number, to: number, viewport?: ViewportState): string {
+  const diff = to - from;
+  const pct = from !== 0 ? (diff / from) * 100 : 0;
+  const sign = diff >= 0 ? '+' : '';
+  // A change is shown at the precision of the price it moved from.
+  return `${sign}${formatDrawingPrice(diff, from, viewport)} (${sign}${formatPercent(pct, viewport)}%)`;
+}
+
+/** Compact duration, e.g. "3d 4h", "45m", "2w 1d". */
+export function formatDuration(ms: number): string {
+  const abs = Math.abs(ms);
+  if (abs < MS_HOUR) return `${Math.round(abs / MS_MINUTE)}m`;
+  if (abs < MS_DAY) {
+    const h = Math.floor(abs / MS_HOUR);
+    const m = Math.round((abs - h * MS_HOUR) / MS_MINUTE);
+    return m > 0 ? `${h}h ${m}m` : `${h}h`;
+  }
+  const days = Math.floor(abs / MS_DAY);
+  const h = Math.round((abs - days * MS_DAY) / MS_HOUR);
+  if (days >= 7) {
+    const w = Math.floor(days / 7);
+    const d = days - w * 7;
+    return d > 0 ? `${w}w ${d}d` : `${w}w`;
+  }
+  return h > 0 ? `${days}d ${h}h` : `${days}d`;
+}
+
+/** Whether anchors carry real timestamps (vs. legacy bar indices). */
+export function hasTimestamps(viewport: ViewportState): boolean {
+  return !!viewport.data && viewport.data.length > 0;
+}
+
+/** Whole bars between two anchors on the current timeframe. */
+export function barsBetween(state: DrawingState, a: number, b: number, viewport: ViewportState): number {
+  const ia = resolveBarIndex(state.anchors[a].time, viewport);
+  const ib = resolveBarIndex(state.anchors[b].time, viewport);
+  return Math.round(Math.abs(ib - ia));
+}
+
+/** Time span between two anchors as text, or null when anchors are bar indices. */
+export function spanBetween(state: DrawingState, a: number, b: number, viewport: ViewportState): string | null {
+  if (!hasTimestamps(viewport)) return null;
+  return formatDuration(state.anchors[b].time - state.anchors[a].time);
+}
+
+/**
+ * Multi-line label on a box of the chart's own surface, in its text colour. `(x, y)` is the box's anchor point:
+ * `align` picks which horizontal edge/center sits on x, and the box grows
+ * upward from y when `above`, downward otherwise. Returns the box rect.
+ */
+export function drawLabelBox(
+  ctx: CanvasRenderingContext2D,
+  lines: string[],
+  x: number,
+  y: number,
+  align: 'left' | 'center' | 'right' = 'center',
+  above = true,
+): { x: number; y: number; width: number; height: number } {
+  const look = drawingLook();
+  ctx.font = roleFont('label');
+  const lineHeight = Math.round(look.sizes.label * LABEL_LINE_RATIO);
+  let textW = 0;
+  for (const line of lines) textW = Math.max(textW, ctx.measureText(line).width);
+  const width = Math.ceil(textW + LABEL_PAD_X * 2);
+  const height = lines.length * lineHeight + LABEL_PAD_Y * 2;
+  // On the plot: a box by its edge moves in rather than run under the price axis.
+  const at = keepOnPlot(align === 'left' ? x : align === 'right' ? x - width : x - width / 2, above ? y - height : y, width, height);
+  const left = Math.round(at.left);
+  const top = Math.round(at.top);
+
+  fillLabelSurface(ctx, left, top, width, height);
+  ctx.fillStyle = look.ink;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'top';
+  for (let i = 0; i < lines.length; i++) {
+    ctx.fillText(lines[i], left + LABEL_PAD_X, top + LABEL_PAD_Y + i * lineHeight + (lineHeight - look.sizes.label) / 2);
+  }
+  return { x: left, y: top, width, height };
+}
+
+/**
+ * A label box's surface at (x, y), `width` × `height` (whole px): the chart's
+ * background, nearly opaque, rounded, on a faint line of its text colour.
+ * Leaves the fill style for the box's text to set.
+ */
+export function fillLabelSurface(ctx: CanvasRenderingContext2D, x: number, y: number, width: number, height: number): void {
+  const look = drawingLook();
+  const left = Math.round(x);
+  const top = Math.round(y);
+  const w = Math.round(width);
+  const h = Math.round(height);
+  extendExtent(left, top, w, h);
+  ctx.beginPath();
+  if (typeof ctx.roundRect === 'function') ctx.roundRect(left + 0.5, top + 0.5, w - 1, h - 1, LABEL_RADIUS);
+  else ctx.rect(left + 0.5, top + 0.5, w - 1, h - 1);
+  ctx.fillStyle = withAlpha(look.background, LABEL_SURFACE_ALPHA);
+  ctx.fill();
+  ctx.strokeStyle = withAlpha(look.ink, LABEL_EDGE_ALPHA);
+  ctx.lineWidth = 1;
+  ctx.setLineDash([]);
+  ctx.stroke();
+}
+
+/** A label's box on screen: left, top, right, bottom (CSS px). */
+export interface LabelBox {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+/**
+ * The first of `spots` clear of the legend and of `placed` (a tool's own
+ * labels so far), or null when none is.
+ */
+export function clearSpot(spots: readonly LabelBox[], placed: readonly LabelBox[]): LabelBox | null {
+  return spots.find((b) => !overlapsKeepOut(b.left, b.top, b.right, b.bottom)
+    && placed.every((p) => b.right <= p.left || p.right <= b.left || b.bottom <= p.top || p.bottom <= b.top)) ?? null;
+}
+
+/** Ratio of two price legs, e.g. |BC| / |AB|, as text ("0.618"). */
+export function legRatio(state: DrawingState, num: [number, number], den: [number, number]): string {
+  const n = Math.abs(state.anchors[num[1]].price - state.anchors[num[0]].price);
+  const d = Math.abs(state.anchors[den[1]].price - state.anchors[den[0]].price);
+  return d === 0 ? '—' : (n / d).toFixed(3);
+}

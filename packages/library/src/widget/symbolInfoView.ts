@@ -1,0 +1,272 @@
+import type { NewsItem, Quote, SymbolInfo } from '@1penny/commons';
+import { barTimeUnit, formatPrice, isValidTimeZone, marketStatus, readNews, symbolTimeZone, zoneOffsetMinutes } from '@1penny/commons';
+import { fill, type Translator } from './i18n.js';
+import type { SymbolInfoNews, SymbolInfoView } from './WidgetSymbolInfo.js';
+
+/** Headlines asked for at once, and how long a symbol's stay fresh. */
+const NEWS_LIMIT = 10;
+/** Headlines asked of the source: the panel shows the newest `NEWS_LIMIT`, the chart marks them all. */
+const NEWS_FETCH = 50;
+const NEWS_TTL_MS = 5 * 60_000;
+const DAY_MS = 86_400_000;
+/** Decimals the change's percentage shows. */
+const PERCENT_DECIMALS = 2;
+
+type DayBar = { time: number; open: number; high: number; low: number; close: number; volume?: number };
+
+/** What the symbol info panel is drawn from. */
+export interface SymbolInfoInput {
+  symbol: string;
+  /** What the chart knows: the market's hours, price step, currency and zone come from it. */
+  info: SymbolInfo | null;
+  /** Where the name, exchange and kind come from, when not `info` (the symbols given fill what the chart leaves out). */
+  names?: SymbolInfo | null;
+  /** The live quote, when a source gives one. */
+  quote: Quote | undefined;
+  /** The chart's bars: the day's numbers come from them when there's no quote. */
+  bars: readonly DayBar[];
+  /** A price as the chart writes it. */
+  formatPrice: (price: number) => string;
+  t: Translator;
+  /** The language words are written in ("in 3 hours"), and the one numbers are. */
+  textLocale: string;
+  numberLocale: string;
+  now: number;
+}
+
+/** The symbol info panel's content: price and change, market status, the day's numbers. */
+export function buildSymbolInfoView(input: SymbolInfoInput): SymbolInfoView {
+  const { info, quote, t, textLocale } = input;
+  const zone = symbolTimeZone(info);
+  const day = sessionDay(input.bars, zone);
+  const fp = input.formatPrice;
+
+  const last = quote?.last ?? day?.close;
+  const prevClose = quote?.prevClose ?? day?.prevClose;
+  const change = quote?.change ?? (last !== undefined && prevClose !== undefined ? last - prevClose : undefined);
+  const base = last !== undefined && change !== undefined ? last - change : undefined;
+  const percent = quote?.changePercent ?? (change !== undefined && base ? (change / base) * 100 : undefined);
+
+  const status = marketStatus(info, input.now);
+  let statusText = t(status.state === 'open' ? 'symbolInfo.open' : status.state === 'closed' ? 'symbolInfo.closed' : 'symbolInfo.always');
+  if (status.state !== 'always' && status.next !== null) {
+    const when = relativeTime(status.next - input.now, textLocale);
+    statusText += ` · ${fill(t(status.state === 'open' ? 'symbolInfo.closesIn' : 'symbolInfo.opensIn'), { when })}`;
+  }
+
+  const stats: { label: string; value: string }[] = [];
+  const add = (label: string, value: string | undefined) => {
+    if (value) stats.push({ label, value });
+  };
+  const price = (v: number | undefined) => (v !== undefined ? fp(v) : undefined);
+  add(t('dataWindow.open'), price(quote?.open ?? day?.open));
+  add(t('dataWindow.high'), price(quote?.high ?? day?.high));
+  add(t('dataWindow.low'), price(quote?.low ?? day?.low));
+  add(t('symbolInfo.prevClose'), price(prevClose));
+  const volume = quote?.volume ?? day?.volume;
+  add(t('dataWindow.volume'), volume !== undefined ? compactNumber(volume, input.numberLocale) : undefined);
+  add(t('symbolInfo.bid'), price(quote?.bid));
+  add(t('symbolInfo.ask'), price(quote?.ask));
+  add(t('symbolInfo.tick'), info?.minTick !== undefined ? String(info.minTick) : undefined);
+  add(t('symbolInfo.currency'), info?.currency);
+  add(t('symbolInfo.timezone'), zone);
+  add(t('symbolInfo.hours'), sessionsText(info, textLocale));
+
+  const sign = (change ?? 0) >= 0 ? '+' : '-';
+  const named = input.names === undefined ? info : input.names;
+  return {
+    symbol: input.symbol,
+    description: named?.description,
+    meta: [named?.exchange, named?.type].filter(Boolean).join(' · ') || undefined,
+    price: last !== undefined ? fp(last) : undefined,
+    change: change !== undefined
+      ? { text: `${sign}${fp(Math.abs(change))}${percent !== undefined ? ` (${sign}${fixedNumber(Math.abs(percent), PERCENT_DECIMALS, input.numberLocale)}%)` : ''}`, up: change >= 0 }
+      : undefined,
+    status: { state: status.state, text: statusText },
+    stats,
+  };
+}
+
+type NewsSource = (symbol: string, limit: number) => unknown;
+
+/**
+ * Headlines for a symbol, cached a few minutes. Only the latest request
+ * reaches the panel: an older one that answers late is dropped.
+ */
+export class SymbolNews {
+  private request = 0;
+  private cache = new Map<string, { at: number; items: NewsItem[] }>();
+  /** A symbol's request on its way: a second asker waits for the same one. */
+  private pending = new Map<string, Promise<NewsItem[]>>();
+
+  /**
+   * `symbol`'s headlines from `source`, newest first: from the cache while
+   * it is fresh, else asked for once however many ask. Rejects when the
+   * source fails.
+   */
+  headlines(symbol: string, source: NewsSource): Promise<NewsItem[]> {
+    const cached = this.cache.get(symbol);
+    if (cached && Date.now() - cached.at < NEWS_TTL_MS) return Promise.resolve(cached.items);
+    const running = this.pending.get(symbol);
+    if (running) return running;
+    const request = Promise.resolve()
+      .then(() => source(symbol, NEWS_FETCH))
+      .then((raw) => {
+        const items = readNews(raw, NEWS_FETCH);
+        this.cache.set(symbol, { at: Date.now(), items });
+        return items;
+      })
+      .finally(() => this.pending.delete(symbol));
+    this.pending.set(symbol, request);
+    return request;
+  }
+
+  /**
+   * Load `symbol`'s headlines from `source` (null: none to show) into
+   * `render`; `stale` says the panel has gone (the widget destroyed).
+   */
+  load(symbol: string, source: NewsSource | null, render: (news: SymbolInfoNews) => void, locale: string, stale: () => boolean): void {
+    // Every load is the latest: one still on its way answers to nobody.
+    const request = ++this.request;
+    if (!source) {
+      render({ kind: 'none' });
+      return;
+    }
+    const show = (items: NewsItem[]) => {
+      const now = Date.now();
+      render({
+        kind: 'items',
+        items: items.slice(0, NEWS_LIMIT).map((item) => ({
+          title: item.title,
+          url: item.url,
+          meta: [item.source, relativeTime(item.time - now, locale)].filter(Boolean).join(' · '),
+        })),
+      });
+    };
+    const cached = this.cache.get(symbol);
+    if (cached && Date.now() - cached.at < NEWS_TTL_MS) {
+      show(cached.items);
+      return;
+    }
+    render({ kind: 'loading' });
+    this.headlines(symbol, source)
+      .then((items) => {
+        if (request !== this.request || stale()) return;
+        show(items);
+      })
+      .catch(() => {
+        if (request === this.request && !stale()) render({ kind: 'failed' });
+      });
+  }
+}
+
+/**
+ * The latest day in the bars, in the exchange's zone (UTC when it has none):
+ * its open, range, volume and last close, and the close before it.
+ */
+export function sessionDay(
+  bars: readonly DayBar[],
+  zone: string | undefined,
+): { open: number; high: number; low: number; close: number; volume: number; prevClose?: number } | null {
+  if (bars.length === 0) return null;
+  const last = bars[bars.length - 1];
+  const first = lastDayStart(bars, zone);
+  let high = -Infinity;
+  let low = Infinity;
+  let volume = 0;
+  for (let i = first; i < bars.length; i++) {
+    high = Math.max(high, bars[i].high);
+    low = Math.min(low, bars[i].low);
+    volume += bars[i].volume ?? 0;
+  }
+  return { open: bars[first].open, high, low, close: last.close, volume, prevClose: first > 0 ? bars[first - 1].close : undefined };
+}
+
+/** The close before the latest day in the bars, in the exchange's zone: what the day's move is read against. */
+export function priorDayClose(bars: readonly DayBar[], zone: string | undefined): number | undefined {
+  const first = lastDayStart(bars, zone);
+  return first > 0 ? bars[first - 1].close : undefined;
+}
+
+/**
+ * Where the latest day in the bars starts. The bars are in time order, so it
+ * is found by halving: a day of second bars is 86,400 of them, and the
+ * watchlist asks every second. This takes the exchange's day never to step
+ * back, which only a zone whose clocks go back across midnight breaks, by a
+ * bar or so on that one night.
+ */
+function lastDayStart(bars: readonly DayBar[], zone: string | undefined): number {
+  const tz = zone && isValidTimeZone(zone) ? zone : null;
+  const unit = barTimeUnit(bars);
+  const dayOf = (t: number) => {
+    const ms = t * unit;
+    return Math.floor((ms + (tz ? zoneOffsetMinutes(tz, ms) * 60_000 : 0)) / DAY_MS);
+  };
+  const today = dayOf(bars[bars.length - 1].time);
+  let lo = 0;
+  let hi = bars.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (dayOf(bars[mid].time) < today) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+/** "in 3 hours", "5 minutes ago": the nearest whole minutes, hours or days. */
+export function relativeTime(deltaMs: number, locale: string): string {
+  const minutes = deltaMs / 60_000;
+  const [value, unit]: [number, Intl.RelativeTimeFormatUnit] = Math.abs(minutes) < 60
+    ? [Math.round(minutes) || Math.sign(minutes) || 1, 'minute']
+    : Math.abs(minutes) < 24 * 60
+      ? [Math.round(minutes / 60), 'hour']
+      : [Math.round(minutes / 1440), 'day'];
+  try {
+    return new Intl.RelativeTimeFormat(locale, { numeric: 'auto' }).format(value, unit);
+  } catch {
+    return new Intl.RelativeTimeFormat('en', { numeric: 'auto' }).format(value, unit);
+  }
+}
+
+/**
+ * `value` to `decimals`, in `locale` (2.234,50 in de-DE), as the price beside it is written:
+ * commons' `formatPrice`, guarded as `relativeTime` and `compactNumber` beside it are. The
+ * view takes its locale as any string, and for a tag Intl refuses ('pt_BR') `formatPrice`
+ * throws a RangeError that would leave the panel empty, so plain digits are written instead.
+ */
+function fixedNumber(value: number, decimals: number, locale: string): string {
+  try {
+    return formatPrice(value, decimals, locale);
+  } catch {
+    return value.toFixed(decimals);
+  }
+}
+
+function compactNumber(value: number, locale: string): string {
+  try {
+    return new Intl.NumberFormat(locale, { notation: 'compact', maximumFractionDigits: 2 }).format(value);
+  } catch {
+    return String(value);
+  }
+}
+
+/** "09:30–16:00 Mon–Fri", from a symbol's sessions; undefined without any. */
+function sessionsText(info: SymbolInfo | null, locale: string): string | undefined {
+  const sessions = info?.sessions ?? [];
+  if (sessions.length === 0) return undefined;
+  let names: string[];
+  try {
+    const format = new Intl.DateTimeFormat(locale, { weekday: 'short', timeZone: 'UTC' });
+    names = Array.from({ length: 7 }, (_, d) => format.format(Date.UTC(1970, 0, 4 + d))); // 4 Jan 1970 was a Sunday
+  } catch {
+    names = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  }
+  const daysText = (days: number[] | undefined): string => {
+    const list = [...new Set((days ?? []).filter((d) => Number.isInteger(d) && d >= 0 && d <= 6))].sort((a, b) => a - b);
+    if (list.length === 0 || list.length === 7) return '';
+    const contiguous = list.every((d, i) => i === 0 || d === list[i - 1] + 1);
+    return contiguous && list.length > 2 ? `${names[list[0]]}–${names[list[list.length - 1]]}` : list.map((d) => names[d]).join(', ');
+  };
+  // The times read left to right in any language (isolated, so a right-to-left line keeps 09:30–16:00).
+  return sessions.map((s) => [`⁦${s.start}–${s.end}⁩`, daysText(s.days)].filter(Boolean).join(' ')).join(', ');
+}

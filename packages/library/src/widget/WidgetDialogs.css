@@ -1,0 +1,1843 @@
+/* === The indicators dialog === */
+
+/* 610 wide, a Fibonacci number: the groups take 233 and the list 377 beside them (377 : 233 = phi).
+   A fixed height, so the dialog keeps still while a search shortens the list. */
+.pcw-modal.pcw-ip {
+  width: 610px;
+  height: min(610px, 86vh);
+  height: min(610px, 86dvh);
+  max-height: none;
+}
+
+/* A dialog's search is a band across it, under its title, with a rule beneath: no box, no ring when
+   focused. The caret and the dialog itself say where typing goes; a lit box around the one field a
+   search dialog has only shouted it. As tall as the field and its margins were, set in as the title. */
+.pcw-ip-search,
+.pcw-ss-search {
+  display: flex;
+  align-items: center;
+  gap: var(--1p-space-4);
+  flex: none;
+  height: calc(var(--1p-control-h) + 2 * var(--1p-space-4));
+  margin: 0;
+  padding: 0 var(--1p-space-6);
+  border: none;
+  border-bottom: 1px solid var(--1p-divider);
+  border-radius: 0;
+  background: transparent;
+  color: var(--1p-text-muted);
+  transition: color var(--1p-dur-fast) var(--1p-ease);
+}
+
+/* Focused, only the magnifier takes the text's colour. */
+.pcw-ip-search:focus-within,
+.pcw-ss-search:focus-within {
+  color: var(--1p-text);
+}
+
+/* The magnifier root phi of the typed text (19 at 15), as the close is of the title. */
+.pcw-ip-search svg,
+.pcw-ss-search svg {
+  flex: none;
+  width: calc(var(--1p-font-size-lg) * 1.272);
+  height: calc(var(--1p-font-size-lg) * 1.272);
+}
+
+.pcw-ip-search input,
+.pcw-ss-search input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--1p-text);
+  font: inherit;
+  font-size: var(--1p-font-size-lg);
+}
+
+/* In forced colours the muted and the text's colour may be one: the band keeps an outline there,
+   so the field is still found. */
+@media (forced-colors: active) {
+  .pcw-ip-search:focus-within,
+  .pcw-ss-search:focus-within {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+  }
+}
+
+/* The browser's clear button for a search field (bold, and blue in Chrome's light scheme) as the
+   icon set's close, in the muted text, the text's on hover. A mask, so it takes the colour. */
+.pcw-ip-search input::-webkit-search-cancel-button,
+.pcw-ss-search input::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+  appearance: none;
+  width: calc(var(--1p-font-size-lg) * 1.272);
+  height: calc(var(--1p-font-size-lg) * 1.272);
+  background: var(--1p-text-muted);
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M6 6L18 18M18 6L6 18' fill='none' stroke='%23000' stroke-width='1.75' stroke-linecap='round'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M6 6L18 18M18 6L6 18' fill='none' stroke='%23000' stroke-width='1.75' stroke-linecap='round'/%3E%3C/svg%3E") center / contain no-repeat;
+  cursor: pointer;
+}
+
+.pcw-ip-search input::-webkit-search-cancel-button:hover,
+.pcw-ss-search input::-webkit-search-cancel-button:hover {
+  background: var(--1p-text);
+}
+
+.pcw-ip-search input::placeholder,
+.pcw-ss-search input::placeholder {
+  color: var(--1p-text-muted);
+}
+
+.pcw-ip-body {
+  display: grid;
+  grid-template-columns: 233px minmax(0, 1fr);
+  flex: 1;
+  min-height: 0;
+}
+
+.pcw-ip-nav,
+.pcw-set-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: var(--1p-space-4) var(--1p-space-3);
+  /* Logical sides: in Arabic, Hebrew or Persian the tabs sit on the right. */
+  border-inline-end: 1px solid var(--1p-divider);
+  background: var(--1p-bg-surface);
+  overflow-y: auto;
+  border-end-start-radius: var(--1p-dialog-radius);
+}
+
+.pcw-ip-tab,
+.pcw-set-tab {
+  display: flex;
+  align-items: center;
+  gap: var(--1p-space-3);
+  flex: none;
+  height: var(--1p-menu-item-h);
+  padding: 0 var(--1p-space-4);
+  border: none;
+  border-radius: var(--1p-menu-item-radius);
+  background: transparent;
+  color: var(--1p-text-dim);
+  font: inherit;
+  font-size: var(--1p-font-size);
+  text-align: start;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--1p-dur-fast) var(--1p-ease), color var(--1p-dur-fast) var(--1p-ease);
+}
+
+.pcw-ip-tab svg,
+.pcw-set-tab svg {
+  flex: none;
+}
+
+/* The kinds start below a gap: favourites and templates are yours, the rest the library's. */
+.pcw-ip-tab[data-view='all'] {
+  margin-top: var(--1p-space-4);
+}
+
+.pcw-ip-tab:hover,
+.pcw-set-tab:hover {
+  background: var(--1p-hover-bg);
+  color: var(--1p-text);
+}
+
+.pcw-ip-tab.pcw-active,
+.pcw-set-tab.pcw-active {
+  background: var(--1p-on-bg);
+  color: var(--1p-on-fg);
+  font-weight: var(--1p-weight-strong);
+}
+
+.pcw-ip-nav--searching .pcw-ip-tab.pcw-active {
+  background: transparent;
+  color: var(--1p-text-dim);
+  font-weight: var(--1p-weight);
+}
+
+.pcw-ip-list {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 var(--1p-space-4) var(--1p-space-5);
+}
+
+/* Each kind's name stays at the top while its indicators scroll under it. */
+.pcw-ip-heading {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: var(--1p-space-5) var(--1p-space-4) var(--1p-space-2);
+  background: var(--1p-bg-elevated);
+  color: var(--1p-text-muted);
+  font-size: var(--1p-font-size-xs);
+  font-weight: var(--1p-weight-strong);
+  text-transform: var(--1p-label-case);
+  letter-spacing: var(--1p-label-tracking);
+}
+
+.pcw-ip-list > :first-child:not(.pcw-ip-heading) {
+  margin-top: var(--1p-space-4);
+}
+
+.pcw-ip-row {
+  display: flex;
+  align-items: center;
+  gap: var(--1p-space-1);
+  border-radius: var(--1p-menu-item-radius);
+  transition: background var(--1p-dur-fast) var(--1p-ease);
+}
+
+.pcw-ip-row:hover {
+  background: var(--1p-hover-bg);
+}
+
+.pcw-ip-add {
+  display: flex;
+  align-items: center;
+  gap: var(--1p-space-3);
+  flex: 1;
+  min-width: 0;
+  height: var(--1p-menu-item-h);
+  padding: 0 var(--1p-space-4);
+  border: none;
+  border-radius: var(--1p-menu-item-radius);
+  background: transparent;
+  color: var(--1p-text);
+  font: inherit;
+  font-size: var(--1p-font-size);
+  text-align: start;
+  cursor: pointer;
+}
+
+.pcw-ip-add:focus-visible,
+.pcw-ip-aside:focus-visible,
+.pcw-ip-tab:focus-visible,
+.pcw-set-tab:focus-visible {
+  outline: none;
+  box-shadow: var(--1p-ring);
+}
+
+.pcw-ip-add svg {
+  flex: none;
+  color: var(--1p-text-muted);
+}
+
+.pcw-ip-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pcw-ip-short {
+  flex: none;
+  color: var(--1p-text-muted);
+  font-family: var(--1p-font-mono);
+  font-size: var(--1p-font-size-xs);
+}
+
+/* Where it draws, quietly at the row's end. */
+.pcw-ip-kind {
+  flex: none;
+  margin-inline-start: auto;
+  color: var(--1p-text-muted);
+  font-size: var(--1p-font-size-xs);
+  text-transform: var(--1p-label-case);
+  letter-spacing: var(--1p-label-tracking);
+}
+
+/* How many are on the chart: ink on its wash, the figures in a column. */
+.pcw-ip-count {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  min-width: var(--1p-space-6);
+  height: var(--1p-space-6);
+  padding: 0 var(--1p-space-2);
+  border-radius: var(--1p-tag-radius);
+  background: var(--1p-accent-soft);
+  color: var(--1p-accent);
+  font-family: var(--1p-font-mono);
+  font-size: var(--1p-font-size-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.pcw-ip-aside {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: var(--1p-control-h-sm);
+  height: var(--1p-control-h-sm);
+  border: none;
+  border-radius: var(--1p-menu-item-radius);
+  background: transparent;
+  color: var(--1p-text-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--1p-dur-fast) var(--1p-ease), color var(--1p-dur-fast) var(--1p-ease);
+}
+
+/* Shown on the row in hand; always for a starred one, filled in ink; always on a touch screen. */
+.pcw-ip-row:hover .pcw-ip-aside,
+.pcw-ip-row:focus-within .pcw-ip-aside,
+.pcw-ip-star[aria-pressed='true'] {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .pcw-ip-aside {
+    opacity: 1;
+  }
+}
+
+.pcw-ip-aside:hover {
+  color: var(--1p-text);
+  background: var(--1p-hover-bg);
+}
+
+.pcw-ip-star[aria-pressed='true'] {
+  color: var(--1p-accent);
+}
+
+.pcw-ip-star[aria-pressed='true'] svg path {
+  fill: currentColor;
+}
+
+.pcw-ip-remove:hover {
+  color: var(--1p-red);
+}
+
+.pcw-ip-save {
+  flex: none;
+  width: 100%;
+  color: var(--1p-accent);
+  font-weight: var(--1p-weight-strong);
+}
+
+.pcw-ip-save svg {
+  color: currentColor;
+}
+
+.pcw-ip-save:hover {
+  background: var(--1p-accent-soft);
+}
+
+.pcw-ip-empty {
+  max-width: 34ch;
+  padding: var(--1p-space-6) var(--1p-space-4);
+  color: var(--1p-text-muted);
+  font-size: var(--1p-font-size-sm);
+  line-height: 1.5;
+  text-wrap: pretty;
+}
+
+/* Heard by a screen reader, not seen. */
+.pcw-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* A phone: the dialog is the widget's sheet, as tall as a sheet goes, and the groups a row of chips. */
+@media (max-width: 640px) {
+  .pcw-modal.pcw-ip {
+    /* Above the on-screen keyboard: the sheet's top stays on the screen. */
+    height: calc(92vh - var(--1p-keyboard-inset, 0px));
+    height: calc(92dvh - var(--1p-keyboard-inset, 0px));
+  }
+
+  .pcw-ip-body {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .pcw-ip-nav,
+  .pcw-set-nav {
+    flex-direction: row;
+    gap: var(--1p-space-2);
+    padding: var(--1p-space-3) var(--1p-space-4);
+    border-inline-end: none;
+    border-bottom: 1px solid var(--1p-divider);
+    border-radius: 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+  }
+
+  .pcw-ip-tab[data-view='all'] {
+    margin-top: 0;
+    margin-inline-start: var(--1p-space-4);
+  }
+
+  .pcw-ip-tab,
+  .pcw-set-tab {
+    /* A finger's size, as the dialogs' other tabs on a phone. */
+    min-height: 40px;
+    border: var(--1p-border-w) solid var(--1p-border);
+  }
+
+
+  .pcw-ip-list {
+    padding-inline: var(--1p-space-3);
+  }
+}
+
+/* === The indicator settings, and a drawing's === */
+
+/* One half step of phi under the indicators dialog: 610 / sqrt(phi) = 480. */
+@media (min-width: 641px) {
+  .pcw-modal.pcw-modal-narrow.pcw-indi,
+  .pcw-modal.pcw-modal-narrow.pcw-drawing-settings {
+    width: 480px;
+    max-width: 92vw;
+  }
+}
+
+/* A line, or a kind of interval: ticked where it shows, its name, then what sets it. */
+.pcw-indi-plot-name {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--1p-space-4);
+  min-width: 0;
+  cursor: pointer;
+}
+
+.pcw-indi-plot-name .pcw-settings-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Unticked, its name steps back. */
+.pcw-indi-plot-name:has(input:not(:checked)) .pcw-settings-label {
+  color: var(--1p-text-muted);
+}
+
+.pcw-indi-plot-controls,
+.pcw-indi-range {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--1p-space-3);
+  flex: none;
+}
+
+/* A box ticked beside other controls in a row (bold, italics, a text box's background). */
+.pcw-inline-check {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--1p-space-2);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.pcw-indi-plot-controls .pcw-indi-select {
+  width: 104px;
+}
+
+/* A mark's shape names run longer than a dash's; its size is a few characters. */
+.pcw-indi-plot-controls .pcw-indi-select[data-role='mark-shape'] {
+  width: 128px;
+}
+
+.pcw-indi-plot-controls .pcw-indi-select[data-role='mark-size'] {
+  width: 84px;
+}
+
+.pcw-indi-range {
+  color: var(--1p-text-muted);
+}
+
+.pcw-indi-range .pcw-indi-input {
+  width: 68px;
+  text-align: end;
+}
+
+.pcw-indi-range .pcw-indi-input:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Defaults on the left; Cancel and Ok on the right, one height for all three. */
+.pcw-indi .pcw-modal-footer,
+.pcw-set .pcw-modal-footer,
+.pcw-drawing-settings .pcw-modal-footer {
+  gap: var(--1p-space-4);
+}
+
+.pcw-footer-end {
+  display: flex;
+  align-items: center;
+  gap: var(--1p-space-4);
+}
+
+.pcw-indi .pcw-modal-footer button,
+.pcw-set .pcw-modal-footer button,
+.pcw-drawing-settings .pcw-modal-footer button {
+  height: var(--1p-menu-item-h);
+  padding-block: 0;
+}
+
+.pcw-footer-menu,
+.pcw-footer-cancel {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--1p-space-2);
+  padding-inline: var(--1p-space-5);
+  border: var(--1p-border-w) solid var(--1p-border);
+  border-radius: var(--1p-control-radius);
+  background: transparent;
+  color: var(--1p-text-dim);
+  font: inherit;
+  font-size: var(--1p-font-size);
+  cursor: pointer;
+  transition: background var(--1p-dur-fast) var(--1p-ease), color var(--1p-dur-fast) var(--1p-ease), border-color var(--1p-dur-fast) var(--1p-ease);
+}
+
+.pcw-footer-cancel {
+  border-color: var(--1p-border-strong);
+  color: var(--1p-text);
+}
+
+.pcw-footer-menu:hover,
+.pcw-footer-menu[aria-expanded='true'],
+.pcw-footer-cancel:hover {
+  background: var(--1p-hover-bg);
+  color: var(--1p-text);
+}
+
+.pcw-footer-menu:focus-visible,
+.pcw-footer-cancel:focus-visible,
+.pcw-indi .pcw-done-btn:focus-visible,
+.pcw-set .pcw-done-btn:focus-visible,
+.pcw-drawing-settings .pcw-done-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--1p-ring);
+}
+
+/* A drawing's switches: the box, then its name, a list without rules between. */
+.pcw-check-row {
+  justify-content: flex-start;
+  gap: var(--1p-space-4);
+  padding-block: var(--1p-space-3);
+  cursor: pointer;
+}
+
+.pcw-settings-row + .pcw-check-row,
+.pcw-check-row + .pcw-settings-row {
+  border-top: 0;
+}
+
+/* A point: its name, then its price, date and time in columns; on a phone the price over the date and time. */
+.pcw-draw-point {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) minmax(0, 1.3fr) minmax(0, 1fr);
+  gap: var(--1p-space-4);
+}
+
+.pcw-draw-point > .pcw-settings-label {
+  white-space: nowrap;
+}
+
+.pcw-draw-point .pcw-indi-plot-controls {
+  display: contents;
+}
+
+.pcw-draw-point input {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+}
+
+.pcw-draw-point input[type='number'] {
+  text-align: end;
+}
+
+@media (max-width: 640px) {
+  .pcw-draw-point {
+    grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .pcw-draw-point > .pcw-settings-label {
+    grid-row: span 2;
+  }
+
+  .pcw-draw-point input[type='number'] {
+    grid-column: span 2;
+  }
+}
+
+.pcw-drawing-settings .pcw-indi-plot-controls input[type='number']:not(.pcw-draw-point *) {
+  width: 68px;
+  text-align: end;
+}
+
+/* The unit after a number (the fill's opacity in %). */
+.pcw-unit {
+  margin-inline-start: calc(-1 * var(--1p-space-2));
+  color: var(--1p-text-muted);
+}
+
+/* === The chart settings === */
+
+/* 776 x 610: half a step of phi wider than the indicators dialog (610 x sqrt(phi) = 776), as tall as it,
+   so the dialog is a sqrt(phi) rectangle. The tabs take 233 down the side, as the indicator groups do. */
+.pcw-modal.pcw-set {
+  width: 776px;
+  max-width: 94vw;
+  height: min(610px, 86vh);
+  height: min(610px, 86dvh);
+  max-height: none;
+}
+
+.pcw-set-body {
+  display: grid;
+  grid-template-columns: 233px minmax(0, 1fr);
+  flex: 1;
+  min-height: 0;
+}
+
+.pcw-set-panel {
+  min-width: 0;
+}
+
+/* A phone: the widget's sheet across the screen, the tabs a row of chips over the settings. After the rules above, which it overrides. */
+@media (max-width: 640px) {
+  .pcw-modal.pcw-set {
+    width: 100vw;
+    max-width: 100vw;
+    /* Above the on-screen keyboard: the sheet's top stays on the screen. */
+    height: calc(92vh - var(--1p-keyboard-inset, 0px));
+    height: calc(92dvh - var(--1p-keyboard-inset, 0px));
+  }
+
+  .pcw-set-body {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+}
+
+/* === The symbol search, and the same dialog comparing === */
+
+/* As still as the indicators dialog: a fixed height while a search shortens the list. As wide as it,
+   610, up to a screen 1597 wide; past that a phi share of the screen (1 / phi^2), up to 987, the next
+   Fibonacci number: about 733 at 1920, 978 at 2560, room for ids with a venue before the ticker. */
+.pcw-modal.pcw-ss {
+  width: min(987px, max(610px, 38.2vw));
+  height: min(610px, 86vh);
+  height: min(610px, 86dvh);
+  max-height: none;
+}
+
+/* Comparing: how the next symbol goes on the chart, under the search. */
+.pcw-ss-way {
+  display: flex;
+  align-items: center;
+  gap: var(--1p-space-4);
+  flex: none;
+  margin: 0 var(--1p-space-6) var(--1p-space-4);
+  color: var(--1p-text-muted);
+  font-size: var(--1p-font-size-sm);
+}
+
+.pcw-ss-way > span {
+  flex: none;
+}
+
+.pcw-root .pcw-ss-way-select {
+  flex: 1;
+  min-width: 0;
+  height: var(--1p-control-h);
+  padding-block: 0;
+}
+
+/* The heads' height, which the rows scroll in below; the room after a symbol before its name. */
+.pcw-modal.pcw-ss {
+  --1p-ss-head-h: var(--1p-control-h);
+  --1p-ss-name-gap: var(--1p-space-4);
+}
+
+[dir='rtl'] .pcw-ss-symbol {
+  padding-right: 0;
+  padding-left: var(--1p-ss-name-gap);
+}
+
+/* Over the list: the kinds the rows come in, and their exchanges once there are two. The exchanges sit
+   on the tabs' first line when the tabs wrap, not between their lines. */
+.pcw-ss-filters {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--1p-space-4);
+  flex: none;
+  margin: 0 var(--1p-space-6) var(--1p-space-4);
+}
+
+/* The row right under the search's band (the filters, or the compare's way) stands off its rule as
+   it stands off the list: the tabs' and the exchanges' borders never sit on the rule. */
+.pcw-ss-search + .pcw-ss-filters,
+.pcw-ss-search + .pcw-ss-way {
+  margin-top: var(--1p-space-4);
+}
+
+/* The kinds as tabs (All, stock, crypto…), showing the one picked as the look shows a choice. */
+.pcw-ss-kinds {
+  display: flex;
+  flex-wrap: wrap;
+  flex: 1;
+  min-width: 0;
+  gap: var(--1p-space-2);
+}
+
+/* Where they scroll in one line, the tabs fade out at an end with more past it, so a tab cut there
+   reads as more to scroll to. A mask: only its alpha counts, so what shows is drawn in the text's
+   colour, which is opaque, and what fades goes to transparent. */
+.pcw-ss-kinds[data-more] {
+  --1p-ss-shown: currentColor;
+  --1p-ss-fade-start: var(--1p-ss-shown);
+  --1p-ss-fade-end: var(--1p-ss-shown);
+  -webkit-mask-image: linear-gradient(to right, var(--1p-ss-fade-start), var(--1p-ss-shown) var(--1p-space-6), var(--1p-ss-shown) calc(100% - var(--1p-space-6)), var(--1p-ss-fade-end));
+  mask-image: linear-gradient(to right, var(--1p-ss-fade-start), var(--1p-ss-shown) var(--1p-space-6), var(--1p-ss-shown) calc(100% - var(--1p-space-6)), var(--1p-ss-fade-end));
+}
+
+[dir='rtl'] .pcw-ss-kinds[data-more] {
+  -webkit-mask-image: linear-gradient(to left, var(--1p-ss-fade-start), var(--1p-ss-shown) var(--1p-space-6), var(--1p-ss-shown) calc(100% - var(--1p-space-6)), var(--1p-ss-fade-end));
+  mask-image: linear-gradient(to left, var(--1p-ss-fade-start), var(--1p-ss-shown) var(--1p-space-6), var(--1p-ss-shown) calc(100% - var(--1p-space-6)), var(--1p-ss-fade-end));
+}
+
+.pcw-ss-kinds[data-more~='start'] {
+  --1p-ss-fade-start: transparent;
+}
+
+.pcw-ss-kinds[data-more~='end'] {
+  --1p-ss-fade-end: transparent;
+}
+
+.pcw-ss-type {
+  flex: none;
+  height: var(--1p-control-h);
+  padding: 0 var(--1p-space-5);
+  border: none;
+  border-radius: var(--1p-tab-radius);
+  background: transparent;
+  color: var(--1p-text-muted);
+  font: inherit;
+  font-size: var(--1p-font-size-sm);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--1p-dur-fast) var(--1p-ease), color var(--1p-dur-fast) var(--1p-ease);
+}
+
+/* A feed's words as it wrote them ("Cổ phiếu" stays so), only the first letter raised. */
+.pcw-ss-type::first-letter {
+  text-transform: uppercase;
+}
+
+.pcw-ss-type:hover {
+  background: var(--1p-tab-hover);
+  color: var(--1p-text);
+}
+
+.pcw-ss-type[aria-pressed='true'] {
+  background: var(--1p-tab-on-bg);
+  color: var(--1p-tab-on-fg);
+  box-shadow: inset 0 calc(-1 * var(--1p-tab-line)) 0 var(--1p-accent);
+  font-weight: var(--1p-weight-strong);
+}
+
+.pcw-ss-type:focus-visible,
+.pcw-ss-remove:focus-visible {
+  outline: none;
+  box-shadow: var(--1p-ring);
+}
+
+/* The exchanges at the end of the row, as wide as the longest up to 144. */
+.pcw-root .pcw-ss-exchange-filter {
+  flex: none;
+  width: auto;
+  max-width: 144px;
+  height: var(--1p-control-h);
+  margin-inline-start: auto;
+  padding-block: 0;
+  font-size: var(--1p-font-size-sm);
+}
+
+/* What scrolls is one grid, and the heads, the list and each row are its subgrids, so a column is
+   as wide in every row: the badge, the symbol up to a quarter of the list (144 at 610, 233 in a wide
+   dialog, the next Fibonacci number), the name the rest, the kind up to 89, the exchange up to 144
+   ('XYZ · HYPERLIQUID' whole), with quotes the last price up to 144 and the day's change up to 89
+   (a feed's huge figure is cut, not let to push the name out), then the check. An empty cell keeps
+   its column. */
+.pcw-ss-results {
+  display: grid;
+  grid-template-columns: max-content fit-content(clamp(144px, 25%, 233px)) minmax(0, 1fr) fit-content(89px) fit-content(144px) auto;
+  align-content: start;
+  column-gap: var(--1p-space-4);
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  /* A row the arrows reach scrolls in below the heads, not under them. */
+  scroll-padding-block-start: calc(var(--1p-ss-head-h) + var(--1p-space-2));
+  padding: 0 var(--1p-space-4) var(--1p-space-5);
+}
+
+.pcw-ss-results.pcw-ss--quoted {
+  grid-template-columns: max-content fit-content(clamp(144px, 25%, 233px)) minmax(0, 1fr) fit-content(89px) fit-content(144px) fit-content(144px) fit-content(89px) auto;
+}
+
+/* Comparing, under a heading of its own as well. */
+.pcw-ss--compare .pcw-ss-results {
+  scroll-padding-block-start: calc(var(--1p-ss-head-h) + var(--1p-space-5) + var(--1p-space-2) + var(--1p-font-size-xs) * 1.5);
+}
+
+.pcw-ss-results > * {
+  grid-column: 1 / -1;
+}
+
+.pcw-ss-columns,
+.pcw-ss-list,
+.pcw-ss-added,
+.pcw-ss-row,
+.pcw-ss-added-row {
+  display: grid;
+  grid-column: 1 / -1;
+  /* Where subgrids aren't drawn: fixed columns, the rest sized row by row. */
+  grid-template-columns: var(--1p-control-h-sm) 89px minmax(0, 1fr) auto auto auto;
+  grid-template-columns: subgrid;
+  align-items: center;
+  column-gap: inherit;
+}
+
+.pcw-ss--quoted :is(.pcw-ss-columns, .pcw-ss-list, .pcw-ss-added, .pcw-ss-row, .pcw-ss-added-row) {
+  grid-template-columns: var(--1p-control-h-sm) 89px minmax(0, 1fr) auto auto auto auto auto;
+  grid-template-columns: subgrid;
+}
+
+/* The heads stay at the top while the rows scroll under them. */
+.pcw-ss-columns {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  height: var(--1p-ss-head-h);
+  margin-bottom: var(--1p-space-2);
+  padding: 0 var(--1p-space-4);
+  background: var(--1p-bg-elevated);
+  box-shadow: 0 1px 0 var(--1p-divider);
+  color: var(--1p-text-muted);
+  font-size: var(--1p-font-size-xs);
+  font-weight: var(--1p-weight-strong);
+  text-transform: var(--1p-label-case);
+  letter-spacing: var(--1p-label-tracking);
+  white-space: nowrap;
+}
+
+.pcw-ss-head {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pcw-ss-head:nth-child(1) { grid-column: 1; }
+.pcw-ss-head:nth-child(2) { grid-column: 2; }
+.pcw-ss-head:nth-child(3) { grid-column: 3; }
+.pcw-ss-head:nth-child(4) { grid-column: 4; justify-self: end; }
+.pcw-ss-head:nth-child(5) { grid-column: 5; justify-self: end; }
+.pcw-ss-head:nth-child(6) { grid-column: 6; justify-self: end; }
+.pcw-ss-head:nth-child(7) { grid-column: 7; justify-self: end; }
+
+.pcw-ss-row {
+  min-height: var(--1p-menu-item-h);
+  padding: 0 var(--1p-space-4);
+  border-radius: var(--1p-menu-item-radius);
+  cursor: pointer;
+  transition: background var(--1p-dur-fast) var(--1p-ease);
+}
+
+.pcw-ss-row.pcw-selected {
+  background: var(--1p-hover-bg);
+}
+
+/* The logo, or the ticker's first letter on a tint of its kind's colour, cornered as the look's tags. */
+.pcw-ss-badge {
+  --1p-ss-kind: var(--1p-text-dim);
+  grid-column: 1;
+  display: inline-grid;
+  place-items: center;
+  width: var(--1p-control-h-sm);
+  height: var(--1p-control-h-sm);
+  overflow: hidden;
+  border-radius: var(--1p-tag-radius);
+  background: color-mix(in srgb, var(--1p-ss-kind) 16%, transparent);
+  color: var(--1p-ss-kind);
+  font-size: var(--1p-font-size-xs);
+  font-weight: var(--1p-weight-strong);
+  line-height: 1;
+}
+
+.pcw-ss-badge[data-kind='1'] { --1p-ss-kind: var(--1p-kind-1); }
+.pcw-ss-badge[data-kind='2'] { --1p-ss-kind: var(--1p-kind-2); }
+.pcw-ss-badge[data-kind='3'] { --1p-ss-kind: var(--1p-kind-3); }
+.pcw-ss-badge[data-kind='4'] { --1p-ss-kind: var(--1p-kind-4); }
+.pcw-ss-badge[data-kind='5'] { --1p-ss-kind: var(--1p-kind-5); }
+
+img.pcw-ss-badge {
+  background: transparent;
+  object-fit: cover;
+}
+
+/* The figures of a ticker, in the mono face, left to right in any widget, at the start of its column;
+   the chart's own in ink. Padding on the name's side, counted in the column, keeps the longest id a
+   gap twice the columns' from the name ("BINANCE:BTCUSDT" ran into "BTC perpetual"). The cell is
+   left to right itself, so the side is named, not its end. */
+.pcw-ss-symbol {
+  grid-column: 2;
+  display: flex;
+  justify-self: start;
+  max-width: 100%;
+  min-width: 0;
+  padding-right: var(--1p-ss-name-gap);
+  overflow: hidden;
+  color: var(--1p-text);
+  font-family: var(--1p-font-mono);
+  font-weight: var(--1p-weight-strong);
+  white-space: nowrap;
+}
+
+/* The ticker alone (a venue before it is the exchange column's): cut only when it is wider than its column. */
+.pcw-ss-ticker {
+  flex: none;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pcw-ss-row.pcw-current .pcw-ss-symbol {
+  color: var(--1p-accent);
+}
+
+.pcw-ss-symbol mark {
+  background: transparent;
+  color: var(--1p-accent);
+}
+
+.pcw-ss-desc-cell {
+  grid-column: 3;
+  min-width: 0;
+}
+
+/* As wide as its words, at the start of the column, whichever way they run. */
+.pcw-ss-desc {
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--1p-text-dim);
+  font-size: var(--1p-font-size-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The kind as the feed wrote it, and the exchange, each at the end of its column. */
+.pcw-ss-kind,
+.pcw-ss-exchange {
+  justify-self: end;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--1p-font-size-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pcw-ss-kind {
+  grid-column: 4;
+  color: var(--1p-text-muted);
+}
+
+.pcw-ss-exchange {
+  grid-column: 5;
+  color: var(--1p-text-dim);
+  font-weight: var(--1p-weight-strong);
+  text-transform: var(--1p-label-case);
+  letter-spacing: var(--1p-label-tracking);
+}
+
+/* The last price and the day's change, figures in the mono face at the end of their columns; the
+   change in the up or down colour by its sign. */
+.pcw-ss-last,
+.pcw-ss-chg {
+  justify-self: end;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--1p-font-mono);
+  font-size: var(--1p-font-size-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pcw-ss-last {
+  grid-column: 6;
+  color: var(--1p-text);
+}
+
+.pcw-ss-chg {
+  grid-column: 7;
+  color: var(--1p-text-muted);
+}
+
+.pcw-ss-chg[data-tone='up'] { color: var(--1p-green); }
+.pcw-ss-chg[data-tone='down'] { color: var(--1p-red); }
+
+/* The chart's symbol, or one on it already: a check in the last column. */
+.pcw-ss-check {
+  grid-column: -2;
+  display: inline-grid;
+  place-items: center;
+  color: var(--1p-accent);
+}
+
+.pcw-ss-heading[hidden] {
+  display: none;
+}
+
+/* "On the chart" and "Symbols", under the heads while their rows scroll. */
+.pcw-ss-heading {
+  position: sticky;
+  top: var(--1p-ss-head-h);
+  z-index: 1;
+  padding: var(--1p-space-5) var(--1p-space-4) var(--1p-space-2);
+  background: var(--1p-bg-elevated);
+  color: var(--1p-text-muted);
+  font-size: var(--1p-font-size-xs);
+  font-weight: var(--1p-weight-strong);
+  text-transform: var(--1p-label-case);
+  letter-spacing: var(--1p-label-tracking);
+}
+
+.pcw-ss-added-row {
+  min-height: var(--1p-menu-item-h);
+  padding: 0 var(--1p-space-4);
+  border-radius: var(--1p-menu-item-radius);
+}
+
+.pcw-ss-added-row:hover {
+  background: var(--1p-hover-bg);
+}
+
+/* How it is compared, across the name, kind and exchange; the line's colour, where it has one of its own, where the badges are. */
+.pcw-ss-way-cell {
+  grid-column: 3 / -2;
+  display: flex;
+  align-items: center;
+  gap: var(--1p-space-4);
+  min-width: 0;
+}
+
+.pcw-ss-swatch {
+  grid-column: 1;
+  justify-self: center;
+  width: var(--1p-space-4);
+  height: var(--1p-space-4);
+  border-radius: var(--1p-radius-sm);
+}
+
+.pcw-ss-way-label {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--1p-text-dim);
+  font-size: var(--1p-font-size-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pcw-ss-remove {
+  grid-column: -2;
+  display: inline-grid;
+  place-items: center;
+  width: var(--1p-control-h);
+  height: var(--1p-control-h);
+  border: none;
+  border-radius: var(--1p-menu-item-radius);
+  background: transparent;
+  color: var(--1p-text-muted);
+  cursor: pointer;
+}
+
+.pcw-ss-remove:hover {
+  background: var(--1p-hover-bg);
+  color: var(--1p-red);
+}
+
+.pcw-ss-empty {
+  max-width: 44ch;
+  padding: var(--1p-space-6) var(--1p-space-4);
+  color: var(--1p-text-muted);
+  font-size: var(--1p-font-size-sm);
+  line-height: 1.5;
+  text-wrap: pretty;
+}
+
+/* Under a list cut short: how many more match, for typing to narrow. */
+.pcw-ss-more {
+  padding: var(--1p-space-4);
+  color: var(--1p-text-muted);
+  font-size: var(--1p-font-size-xs);
+  line-height: 1.5;
+}
+
+/* The way the dialog opens too: a letter typed on the chart. */
+.pcw-ss-foot {
+  flex: none;
+  padding: var(--1p-space-5) var(--1p-space-6);
+  border-top: 1px solid var(--1p-divider);
+  border-radius: 0 0 var(--1p-dialog-radius) var(--1p-dialog-radius);
+  background: var(--1p-bg-surface);
+  color: var(--1p-text-muted);
+  font-size: var(--1p-font-size-xs);
+  text-align: center;
+}
+
+/* === Go to === */
+
+/* 377: the step of phi under the search dialogs. */
+@media (min-width: 641px) {
+  .pcw-modal.pcw-goto {
+    width: 377px;
+  }
+}
+
+.pcw-goto-form {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.pcw-goto-fields {
+  display: grid;
+  gap: var(--1p-space-5);
+  padding: var(--1p-space-6) var(--1p-space-6) var(--1p-space-4);
+}
+
+/* The date takes the room; the time 144 beside it; a range's end named above its two. */
+.pcw-goto-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 144px;
+  gap: var(--1p-space-3) var(--1p-space-4);
+  align-items: center;
+}
+
+.pcw-goto-label {
+  grid-column: 1 / -1;
+  color: var(--1p-text-muted);
+  font-size: var(--1p-font-size-xs);
+  font-weight: var(--1p-weight-strong);
+  text-transform: var(--1p-label-case);
+  letter-spacing: var(--1p-label-tracking);
+}
+
+.pcw-root .pcw-goto-input {
+  width: 100%;
+  min-width: 0;
+  height: var(--1p-control-h);
+  box-sizing: border-box;
+  padding: 0 var(--1p-space-4);
+  font-size: var(--1p-font-size);
+  font-variant-numeric: tabular-nums;
+}
+
+/* No time on daily bars: the date across the row. */
+.pcw-goto-input[type='date']:last-child {
+  grid-column: 1 / -1;
+}
+
+/* The month under the fields, part of the dialog: no card of its own. */
+.pcw-calendar.pcw-goto-calendar {
+  position: static;
+  width: auto;
+  padding: var(--1p-space-4) var(--1p-space-6) var(--1p-space-5);
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  animation: none;
+}
+
+.pcw-goto-calendar .pcw-calendar-day {
+  height: 34px;
+}
+
+/* In a viewport too short for the month, the form scrolls: its parts keep their height, and
+   the buttons stay at its foot, over what scrolls under them. */
+.pcw-goto-form > * {
+  flex-shrink: 0;
+}
+
+.pcw-goto .pcw-modal-footer {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  margin-top: auto;
+  justify-content: flex-end;
+  gap: var(--1p-space-4);
+}
+
+.pcw-goto .pcw-modal-footer button {
+  height: var(--1p-menu-item-h);
+  padding-block: 0;
+}
+
+.pcw-goto .pcw-done-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--1p-ring);
+}
+
+/* A phone: both are the widget's sheet; the search as tall as a sheet goes, its symbols up to 89
+   wide. The kind's column goes (the badge's colour still tells it), the exchange goes under the
+   ticker, the change under the price, the tabs scroll in one line, and a row is a finger's height. */
+@media (max-width: 640px) {
+  .pcw-modal.pcw-ss {
+    /* Above the on-screen keyboard: the sheet's top stays on the screen. */
+    height: calc(92vh - var(--1p-keyboard-inset, 0px));
+    height: calc(92dvh - var(--1p-keyboard-inset, 0px));
+    /* The column's room goes to the ticker; the columns' own gap is enough here. */
+    --1p-ss-name-gap: 0px;
+  }
+
+  .pcw-ss-way,
+  .pcw-ss-filters {
+    margin-inline: var(--1p-space-4);
+  }
+
+  .pcw-ss-kinds {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .pcw-ss-kinds::-webkit-scrollbar {
+    display: none;
+  }
+
+  .pcw-root .pcw-ss-exchange-filter {
+    max-width: 110px;
+  }
+
+  /* The ticker is the row's key: its column as wide as the widest ticker or exchange under it, up
+     to 144 or 38.2% of the row, and the name gives way first; with quotes, a column as wide as the
+     widest price. */
+  .pcw-ss-results {
+    grid-template-columns: max-content fit-content(min(144px, 38.2%)) minmax(0, 1fr) auto;
+  }
+
+  .pcw-ss-results.pcw-ss--quoted {
+    grid-template-columns: max-content fit-content(min(144px, 38.2%)) minmax(0, 1fr) fit-content(89px) auto;
+  }
+
+  .pcw-ss-columns,
+  .pcw-ss-list,
+  .pcw-ss-added,
+  .pcw-ss-row,
+  .pcw-ss-added-row {
+    grid-template-columns: var(--1p-control-h-sm) 89px minmax(0, 1fr) auto;
+    grid-template-columns: subgrid;
+  }
+
+  .pcw-ss--quoted :is(.pcw-ss-columns, .pcw-ss-list, .pcw-ss-added, .pcw-ss-row, .pcw-ss-added-row) {
+    grid-template-columns: var(--1p-control-h-sm) 89px minmax(0, 1fr) auto auto;
+    grid-template-columns: subgrid;
+  }
+
+  /* The kind, and the heads of what goes under another cell. */
+  .pcw-ss-kind,
+  .pcw-ss-head:nth-child(4),
+  .pcw-ss-head:nth-child(5),
+  .pcw-ss-head:nth-child(7) {
+    display: none;
+  }
+
+  .pcw-ss-head:nth-child(6) {
+    grid-column: 4;
+  }
+
+  /* Two lines a row: the ticker over its exchange, the price over its change, the rest across both.
+     Two venues may list the same ticker, so the exchange is what tells their rows apart: it has the
+     ticker's column to itself, not a narrow one of its own. */
+  .pcw-ss-row {
+    align-content: center;
+  }
+
+  .pcw-ss-badge,
+  .pcw-ss-desc-cell,
+  .pcw-ss-check {
+    grid-row: 1 / span 2;
+  }
+
+  .pcw-ss-symbol,
+  .pcw-ss-last {
+    grid-row: 1;
+  }
+
+  .pcw-ss-exchange {
+    grid-column: 2;
+    grid-row: 2;
+    justify-self: start;
+  }
+
+  .pcw-ss-last,
+  .pcw-ss-chg {
+    grid-column: 4;
+  }
+
+  .pcw-ss-chg {
+    grid-row: 2;
+    font-size: var(--1p-font-size-xs);
+  }
+
+  .pcw-ss-row,
+  .pcw-ss-added-row {
+    min-height: 44px;
+  }
+}
+
+/* Without a keyboard there are no letters to type on the chart. */
+@media (hover: none) and (pointer: coarse) {
+  .pcw-ss-foot {
+    display: none;
+  }
+}
+
+/* === The shortcut sheet === */
+
+/* As wide and as still as the indicators dialog: 610, a fixed height while a search shortens the list. */
+.pcw-modal.pcw-hotkey-sheet {
+  width: 610px;
+  height: min(610px, 86vh);
+  height: min(610px, 86dvh);
+  max-height: none;
+}
+
+.pcw-hotkey-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 var(--1p-space-6) var(--1p-space-5);
+}
+
+/* Two columns as tall as their groups, inside the box that scrolls: on the box itself, of a fixed
+   height, the groups past its foot went into columns to the side, out of reach. */
+.pcw-hotkey-columns {
+  columns: 2;
+  column-gap: var(--1p-space-7);
+}
+
+/* A group keeps together in its column, its name above its rows. */
+.pcw-hotkey-group {
+  break-inside: avoid;
+  padding-top: var(--1p-space-5);
+}
+
+.pcw-hotkey-heading {
+  padding-bottom: var(--1p-space-3);
+  color: var(--1p-text-muted);
+  font-size: var(--1p-font-size-xs);
+  font-weight: var(--1p-weight-strong);
+  text-transform: var(--1p-label-case);
+  letter-spacing: var(--1p-label-tracking);
+}
+
+/* What it does on the left, its keys on the right, the keys in a column of their own. */
+.pcw-hotkey-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--1p-space-4);
+  min-height: calc(var(--1p-space-6) + var(--1p-space-3));
+  padding: var(--1p-space-2) 0;
+}
+
+.pcw-hotkey-label {
+  min-width: 0;
+  color: var(--1p-text);
+  font-size: var(--1p-font-size-sm);
+  line-height: 1.4;
+}
+
+.pcw-hotkey-keys {
+  display: inline-flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--1p-space-2);
+  flex: none;
+  max-width: 55%;
+}
+
+/* A key: its name in the mono face on a key's face. */
+.pcw-hotkey-key,
+.pcw-cp-key {
+  display: inline-block;
+  min-width: calc(var(--1p-space-6) - var(--1p-space-2));
+  padding: 0 var(--1p-space-3);
+  border: var(--1p-border-w) solid var(--1p-border);
+  border-bottom-width: 2px;
+  border-radius: var(--1p-tag-radius);
+  background: var(--1p-bg);
+  color: var(--1p-text-dim);
+  font-family: var(--1p-font-mono);
+  font-size: var(--1p-font-size-xs);
+  line-height: 1.6;
+  text-align: center;
+  white-space: nowrap;
+}
+
+/* A gesture is not a key: its words, quieter. */
+.pcw-hotkey-gesture {
+  color: var(--1p-text-muted);
+  font-size: var(--1p-font-size-xs);
+  white-space: nowrap;
+}
+
+.pcw-hotkey-sep {
+  color: var(--1p-text-muted);
+  font-size: var(--1p-font-size-xs);
+}
+
+.pcw-hotkey-empty {
+  padding: var(--1p-space-6) 0;
+  color: var(--1p-text-muted);
+  font-size: var(--1p-font-size-sm);
+}
+
+/* How to open it again, at its foot. */
+.pcw-hotkey-foot {
+  flex: none;
+  padding: var(--1p-space-5) var(--1p-space-6);
+  border-top: 1px solid var(--1p-divider);
+  border-radius: 0 0 var(--1p-dialog-radius) var(--1p-dialog-radius);
+  background: var(--1p-bg-surface);
+  color: var(--1p-text-muted);
+  font-size: var(--1p-font-size-xs);
+}
+
+/* === The command palette === */
+
+/* 610 wide, a third of the way down: a launcher, not a form; its search is the dialogs' search row. */
+.pcw-modal.pcw-cp {
+  top: 19.1%;
+  transform: translate(-50%, 0);
+  width: 610px;
+  max-height: min(610px, 76.4vh);
+  max-height: min(610px, 76.4dvh);
+  animation: none;
+}
+
+.pcw-cp-results {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  /* A row the arrows reach scrolls in below its group's heading, not under it. */
+  scroll-padding-block-start: calc(var(--1p-space-5) + var(--1p-space-2) + var(--1p-font-size-xs) * 1.5);
+  padding: 0 var(--1p-space-4) var(--1p-space-4);
+}
+
+.pcw-cp-heading {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: var(--1p-space-5) var(--1p-space-4) var(--1p-space-2);
+  background: var(--1p-bg-elevated);
+  color: var(--1p-text-muted);
+  font-size: var(--1p-font-size-xs);
+  font-weight: var(--1p-weight-strong);
+  text-transform: var(--1p-label-case);
+  letter-spacing: var(--1p-label-tracking);
+}
+
+.pcw-cp-row {
+  display: flex;
+  align-items: center;
+  gap: var(--1p-space-4);
+  min-height: var(--1p-menu-item-h);
+  padding: 0 var(--1p-space-4);
+  border-radius: var(--1p-menu-item-radius);
+  color: var(--1p-text);
+  font-size: var(--1p-font-size);
+  cursor: pointer;
+}
+
+.pcw-cp-row.pcw-selected {
+  background: var(--1p-hover-bg);
+}
+
+.pcw-cp-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* What is on now: its name in ink, a check at the end. */
+.pcw-cp-row.pcw-on .pcw-cp-label {
+  color: var(--1p-accent);
+}
+
+.pcw-cp-check {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  color: var(--1p-accent);
+}
+
+.pcw-cp-empty {
+  padding: var(--1p-space-6) var(--1p-space-4);
+  color: var(--1p-text-muted);
+  font-size: var(--1p-font-size-sm);
+}
+
+/* === Layouts === */
+
+/* 480, as the settings of an indicator: a list of names and when they were saved. On a phone, the sheet's width. */
+.pcw-modal.pcw-layouts-dialog {
+  max-height: min(610px, 86vh);
+  max-height: min(610px, 86dvh);
+}
+@media (min-width: 641px) {
+  .pcw-modal.pcw-layouts-dialog { width: 480px; }
+}
+
+.pcw-layouts-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--1p-space-3) var(--1p-space-4) var(--1p-space-5);
+}
+
+.pcw-layouts-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--1p-space-1);
+}
+
+.pcw-layouts-row {
+  display: flex;
+  align-items: center;
+  gap: var(--1p-space-2);
+  padding-inline-end: var(--1p-space-3);
+  border-radius: var(--1p-menu-item-radius);
+}
+
+.pcw-layouts-row:hover,
+.pcw-layouts-row:focus-within {
+  background: var(--1p-hover-bg);
+}
+
+/* A column for the check of the one open, so every name starts at the same place. */
+.pcw-layouts-open {
+  display: grid;
+  grid-template-columns: var(--1p-space-5) minmax(0, 1fr);
+  column-gap: var(--1p-space-3);
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+  padding: var(--1p-space-3) var(--1p-space-4);
+  border: none;
+  border-radius: var(--1p-menu-item-radius);
+  background: transparent;
+  color: var(--1p-text);
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+
+.pcw-layouts-open:focus-visible {
+  outline: none;
+  box-shadow: var(--1p-ring);
+}
+
+.pcw-layouts-name,
+.pcw-layouts-meta {
+  grid-column: 2;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pcw-layouts-name {
+  font-size: var(--1p-font-size);
+  font-weight: var(--1p-weight-strong);
+}
+
+.pcw-layouts-meta {
+  color: var(--1p-text-muted);
+  font-size: var(--1p-font-size-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.pcw-layouts-check {
+  display: inline-grid;
+  place-items: center;
+  grid-column: 1;
+  grid-row: 1 / span 2;
+  color: var(--1p-accent);
+}
+
+.pcw-layouts-open[aria-current='true'] .pcw-layouts-name {
+  color: var(--1p-accent);
+}
+
+/* Rename and delete show on the row in hand; always on a touch screen. */
+.pcw-layouts-row .pcw-account-actions {
+  display: flex;
+  gap: var(--1p-space-1);
+  opacity: 0;
+  transition: opacity var(--1p-dur-fast) var(--1p-ease);
+}
+
+.pcw-layouts-row:is(:hover, :focus-within) .pcw-account-actions,
+.pcw-layouts-row .pcw-account-actions:has(.pcw-layouts-confirm) {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .pcw-layouts-row .pcw-account-actions {
+    opacity: 1;
+  }
+}
+
+.pcw-layouts-confirm {
+  height: var(--1p-control-h);
+  padding: 0 var(--1p-space-4);
+  border: none;
+  border-radius: var(--1p-control-radius);
+  background: var(--1p-red);
+  /* The accent fill's ink reads on the red too: dark on the dark theme's, white on the light's. */
+  color: var(--1p-accent-ink);
+  font: inherit;
+  font-size: var(--1p-font-size-sm);
+  font-weight: var(--1p-weight-strong);
+  cursor: pointer;
+}
+
+.pcw-layouts-confirm:focus-visible {
+  outline: none;
+  box-shadow: var(--1p-ring);
+}
+
+/* A phone: the sheets as tall as they go, the shortcuts in one column. */
+@media (max-width: 640px) {
+  .pcw-modal.pcw-hotkey-sheet {
+    height: calc(92vh - var(--1p-keyboard-inset, 0px));
+    height: calc(92dvh - var(--1p-keyboard-inset, 0px));
+  }
+
+  .pcw-hotkey-body {
+    padding-inline: var(--1p-space-4);
+  }
+
+  .pcw-hotkey-columns {
+    columns: 1;
+  }
+
+  /* Their own heights outrank the sheet's: give them back its height, less the keyboard, and the palette its slide up. */
+  .pcw-modal.pcw-cp,
+  .pcw-modal.pcw-layouts-dialog {
+    max-height: calc(92vh - var(--1p-keyboard-inset, 0px));
+    max-height: calc(92dvh - var(--1p-keyboard-inset, 0px));
+  }
+
+  .pcw-modal.pcw-cp {
+    top: auto;
+    transform: none;
+    animation: pcw-modal-in var(--1p-dur-slow) var(--1p-ease-out);
+  }
+
+  .pcw-cp-row {
+    min-height: 44px;
+  }
+}
+
+/* === The order ticket === */
+
+/* 480, as a drawing's settings: the side, the order, its stop and target, then the receipt. On a phone, the sheet's width. */
+.pcw-modal.pcw-order-ticket {
+  max-height: min(610px, 92vh);
+  max-height: min(610px, 92dvh);
+}
+@media (min-width: 641px) {
+  .pcw-modal.pcw-order-ticket { width: 480px; }
+}
+.pcw-order-ticket[data-side='buy'] { --1p-side: var(--1p-green); }
+.pcw-order-ticket[data-side='sell'] { --1p-side: var(--1p-red); }
+
+.pcw-ticket-heading {
+  display: flex;
+  align-items: baseline;
+  gap: var(--1p-space-4);
+  min-width: 0;
+}
+.pcw-ticket-symbol {
+  overflow: hidden;
+  color: var(--1p-text-muted);
+  font-family: var(--1p-font-mono);
+  font-size: var(--1p-font-size);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.pcw-ticket-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* Buy and Sell: the chosen one filled with its colour, the ground's own colour on it. */
+.pcw-ticket-side {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--1p-space-3);
+  margin-bottom: var(--1p-space-4);
+}
+.pcw-ticket-side-btn {
+  height: 34px;
+  border: var(--1p-border-w) solid var(--1p-border-strong);
+  border-radius: var(--1p-control-radius);
+  background: transparent;
+  color: var(--1p-text-dim);
+  font: inherit;
+  font-size: var(--1p-font-size-lg);
+  font-weight: var(--1p-weight-strong);
+  cursor: pointer;
+  transition: background var(--1p-dur-fast) var(--1p-ease), color var(--1p-dur-fast) var(--1p-ease);
+}
+.pcw-ticket-side-btn:hover { color: var(--1p-text); }
+.pcw-ticket-buy[aria-pressed='true'] { border-color: var(--1p-green); background: var(--1p-green); color: var(--1p-bg); }
+.pcw-ticket-sell[aria-pressed='true'] { border-color: var(--1p-red); background: var(--1p-red); color: var(--1p-bg); }
+.pcw-ticket-side-btn:focus-visible { outline: none; box-shadow: var(--1p-ring); }
+
+/* A row's control goes under its name when they don't fit side by side (a long choice at 320 px). */
+.pcw-ticket-row {
+  flex-wrap: wrap;
+  gap: var(--1p-space-3) var(--1p-space-5);
+}
+.pcw-ticket-market {
+  color: var(--1p-text-dim);
+  font-family: var(--1p-font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* A stop or a target: its switch, its name with how far it is under it, then its price. */
+.pcw-ticket-optional {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--1p-space-4);
+}
+.pcw-ticket-optional-name {
+  display: flex;
+  flex-direction: column;
+  gap: var(--1p-space-1);
+  min-width: 0;
+}
+/* The stop-loss's trail: its switch under the stop's, in the same column, its name beside it. */
+.pcw-ticket-trail {
+  display: flex;
+  justify-content: flex-start;
+  align-items: center;
+  gap: var(--1p-space-4);
+}
+
+.pcw-ticket-away {
+  color: var(--1p-text-muted);
+  font-family: var(--1p-font-mono);
+  font-size: var(--1p-font-size-sm);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+  /* Left to right inside, but at the name's start in either direction (the column's, not its own). */
+  align-self: flex-start;
+}
+
+/* The receipt: under a torn-paper rule, each sum a label and a figure in the mono type. */
+.pcw-ticket-summary:not(:empty) {
+  display: grid;
+  gap: var(--1p-space-2);
+  margin: 0 var(--1p-space-6) var(--1p-space-4);
+  padding-top: var(--1p-space-4);
+  border-top: var(--1p-border-w) dashed var(--1p-border-strong);
+}
+.pcw-ticket-summary-row {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--1p-space-5);
+  color: var(--1p-text-muted);
+  font-size: var(--1p-font-size-sm);
+}
+.pcw-ticket-figure {
+  color: var(--1p-text);
+  font-family: var(--1p-font-mono);
+  font-variant-numeric: tabular-nums;
+}
+.pcw-ticket-figure.pcw-ticket-up { color: var(--1p-green); }
+.pcw-ticket-figure.pcw-ticket-down { color: var(--1p-red); }
+
+.pcw-ticket-problems {
+  padding: 0 var(--1p-space-6) var(--1p-space-4);
+  color: var(--1p-red);
+  font-size: var(--1p-font-size-sm);
+}
+.pcw-ticket-problems p { margin: var(--1p-space-1) 0; }
+
+/* Cancel and Place alone, at the end, as tall as each other. */
+.pcw-order-ticket .pcw-modal-footer { justify-content: flex-end; }
+.pcw-order-ticket .pcw-modal-footer button { height: var(--1p-menu-item-h); padding-block: 0; }
+.pcw-ticket-place {
+  height: var(--1p-menu-item-h);
+  padding-inline: var(--1p-space-6);
+  border: none;
+  border-radius: var(--1p-control-radius);
+  background: var(--1p-side, var(--1p-accent));
+  color: var(--1p-bg);
+  font: inherit;
+  font-size: var(--1p-font-size);
+  font-weight: var(--1p-weight-strong);
+  cursor: pointer;
+}
+.pcw-ticket-place:hover:not(:disabled) { background: color-mix(in srgb, var(--1p-side, var(--1p-accent)) 86%, var(--1p-text)); }
+.pcw-ticket-place:disabled { opacity: 0.45; cursor: not-allowed; }
+.pcw-ticket-place:focus-visible { outline: none; box-shadow: var(--1p-ring); }
+
+/* A phone: the ticket is a sheet above the keyboard, its controls a finger's size. */
+@media (max-width: 640px) {
+  .pcw-modal.pcw-order-ticket {
+    max-height: calc(92vh - var(--1p-keyboard-inset, 0px));
+    max-height: calc(92dvh - var(--1p-keyboard-inset, 0px));
+  }
+  .pcw-stepper .pcw-indi-input { width: 96px; }
+  .pcw-stepper-btn, .pcw-segment { min-width: 34px; }
+  .pcw-segment { height: 34px; }
+  .pcw-stepper { height: 38px; }
+}
+
+/* Forced colours drop the box-shadow rings: an outline marks focus and the chosen side. */
+@media (forced-colors: active) {
+  .pcw-ticket-side-btn[aria-pressed='true'] { outline: 2px solid Highlight; }
+  .pcw-ticket-place { border: 1px solid ButtonText; }
+  .pcw-ticket-side-btn:focus-visible,
+  .pcw-ticket-place:focus-visible { outline: 2px solid Highlight; outline-offset: 2px; }
+}

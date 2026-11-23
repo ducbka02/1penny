@@ -1,0 +1,40 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "types": [],
+    "baseUrl": "..",
+    "paths": {
+      "@1penny/chart": [
+        "packages/library/dist/index.d.ts"
+      ],
+      "@1penny/chart/widget": [
+        "packages/library/dist/widget/index.d.ts"
+      ],
+      "@1penny/chart/widget/locales": [
+        "packages/library/dist/widget/locales/index.d.ts"
+      ],
+      "@1penny/core": [
+        "packages/core/dist/index.d.ts"
+      ],
+      "@1penny/core/patterns": [
+        "packages/core/dist/patterns/index.d.ts"
+      ],
+      "@1penny/commons": [
+        "packages/commons/dist/index.d.ts"
+      ],
+      "@1penny/analytics": [
+        "packages/analytics/dist/index.d.ts"
+      ]
+    }
+  },
+  "include": [
+    "../skills/1penny/.check/*.ts",
+    "type-tests/*.ts"
+  ]
+}

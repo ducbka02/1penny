@@ -1,0 +1,286 @@
+// @vitest-environment jsdom
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import type { ChartOptions } from '@1penny/commons';
+import { memoryLayouts, type LayoutStorage } from '../../state/layoutStorage.js';
+
+/** Stand-in for the canvas-backed Chart: keeps drawings and a chart type, saves and loads them. */
+class FakeChart {
+  static last: FakeChart;
+  drawings: string[] = [];
+  chartType = 'candlestick';
+  loaded: string[] = [];
+  scaleModes: string[] = [];
+  /** The other setters the widget called, in order. */
+  calls: [string, unknown][] = [];
+  private listeners = new Map<string, ((e: { payload: unknown }) => void)[]>();
+
+  constructor(_host: HTMLElement, public options: ChartOptions) {
+    FakeChart.last = this;
+    return new Proxy(this, {
+      get: (target, key, receiver) => {
+        if (key in target) return Reflect.get(target, key, receiver);
+        return (arg: unknown) => { if (typeof key === 'string' && key.startsWith('set')) target.calls.push([key, arg]); };
+      },
+    });
+  }
+
+  on(event: string, cb: (e: { payload: unknown }) => void): () => void {
+    this.listeners.set(event, [...(this.listeners.get(event) ?? []), cb]);
+    return () => {};
+  }
+  emit(event: string, payload: unknown = {}): void {
+    for (const cb of this.listeners.get(event) ?? []) cb({ payload });
+  }
+  saveState(): string {
+    return JSON.stringify({ version: 2, timestamp: Math.random(), theme: 'dark', chartType: this.chartType, drawings: this.drawings });
+  }
+  loadState(json: string): void {
+    this.loaded.push(json);
+    const state = JSON.parse(json) as { drawings: string[]; chartType: string };
+    this.drawings = state.drawings;
+    this.chartType = state.chartType;
+  }
+  setScaleMode(mode: string): void { this.scaleModes.push(mode); }
+  getData(): unknown[] { return []; }
+  getActiveIndicators(): unknown[] { return []; }
+  getIndicatorPanes(): unknown[] { return []; }
+  getPlotRect() { return { x: 0, y: 0, width: 600, height: 300 }; }
+  getLegendBottom(): number { return 40; }
+  isTimeAligned(): boolean { return true; }
+  isTimeframeAllowed(): boolean { return true; }
+  getOrders(): unknown[] { return []; }
+  getPositions(): unknown[] { return []; }
+  getFills(): unknown[] { return []; }
+  getIndicatorOutput(): null { return null; }
+  formatPrice(v: number): string { return v.toFixed(2); }
+}
+
+vi.mock('../../Chart.js', () => ({ Chart: FakeChart }));
+
+const { ChartWidget } = await import('../ChartWidget.js');
+
+let host: HTMLDivElement;
+let widget: InstanceType<typeof ChartWidget>;
+let storage: LayoutStorage;
+
+const make = (options: ConstructorParameters<typeof ChartWidget>[1] = {}) => {
+  widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false, layouts: { storage, debounceMs: 10 }, ...options });
+  return widget;
+};
+const layoutsButton = () => host.querySelector<HTMLButtonElement>('[data-role="layouts"]');
+const menuItems = () => [...host.querySelectorAll<HTMLElement>('.pcw-context-menu [role^=menuitem]')];
+const menuLabels = () => menuItems().map((b) => b.querySelector('.pcw-context-label')?.textContent);
+const pick = (label: string) => menuItems().find((b) => b.querySelector('.pcw-context-label')?.textContent === label)!.click();
+const prompt = () => host.querySelector<HTMLFormElement>('.pcw-name-prompt')!;
+const typeName = (name: string) => {
+  const input = prompt().querySelector('input')!;
+  input.value = name;
+  input.dispatchEvent(new Event('input'));
+};
+const submitName = () => prompt().dispatchEvent(new Event('submit', { cancelable: true }));
+const settle = (ms = 30) => new Promise((r) => setTimeout(r, ms));
+const calls = (name: string) => FakeChart.last.calls.filter(([n]) => n === name).map(([, v]) => v);
+const flush = () => settle(0);
+/** Use the widget (the page's Ctrl+S is its own until then). */
+const press = () => host.querySelector('.pcw-root')!.dispatchEvent(new Event('pointerdown'));
+
+beforeEach(() => {
+  localStorage.clear();
+  storage = memoryLayouts();
+  host = document.createElement('div');
+  document.body.appendChild(host);
+});
+
+afterEach(() => {
+  widget.destroy();
+  host.remove();
+});
+
+describe('ChartWidget named layouts', () => {
+  it('shows an unnamed layout, and a menu to save and open', async () => {
+    make();
+    expect(layoutsButton()!.textContent).toContain('Unnamed');
+    layoutsButton()!.click();
+    await flush();
+    expect(menuLabels()).toEqual(['Save layout', 'Save as…', 'Auto-save', 'Open layout…']);
+    // Save says its key, as the shortcut sheet does.
+    expect(menuItems()[0].getAttribute('aria-keyshortcuts')).toMatch(/^(Ctrl|⌘)\+S$/);
+  });
+
+  it('writes no key for Save in the menu while the keys are off', async () => {
+    make({ features: { hotkeys: false } });
+    layoutsButton()!.click();
+    await flush();
+    expect(menuItems()[0].hasAttribute('aria-keyshortcuts')).toBe(false);
+  });
+
+  it('names a layout’s symbol by its ticker, without the venue before it', async () => {
+    make();
+    await storage.save({ id: 'n', name: 'Nvidia', symbol: 'HYPERLIQUID:xyz:NVDA', timeframe: '1h', updatedAt: 1, content: '{}' });
+    layoutsButton()!.click();
+    await flush();
+    pick('Open layout…');
+    await flush();
+    const row = [...host.querySelectorAll<HTMLElement>('.pcw-layouts-row')].find((r) => r.querySelector('.pcw-layouts-name')?.textContent === 'Nvidia')!;
+    expect(row.querySelector('.pcw-layouts-meta')!.textContent).toContain('NVDA · 1h');
+    expect(row.querySelector('.pcw-layouts-meta')!.textContent).not.toContain('HYPERLIQUID');
+  });
+
+  it('marks the layout open in the dialog with a check, and its name in ink', async () => {
+    make();
+    await widget.getLayoutSession()!.saveAs('Alpha');
+    await storage.save({ id: 'b', name: 'Beta', symbol: 'BBB', timeframe: '1h', updatedAt: 1, content: '{}' });
+    layoutsButton()!.click();
+    await flush();
+    pick('Open layout…');
+    await flush();
+    const rows = [...host.querySelectorAll<HTMLElement>('.pcw-layouts-row')];
+    const alpha = rows.find((r) => r.querySelector('.pcw-layouts-name')?.textContent === 'Alpha')!;
+    const beta = rows.find((r) => r.querySelector('.pcw-layouts-name')?.textContent === 'Beta')!;
+    expect(alpha.querySelector('[aria-current="true"]')).not.toBeNull();
+    expect(alpha.querySelector('.pcw-layouts-check')).not.toBeNull();
+    expect(alpha.querySelector('.pcw-tag')).toBeNull();
+    expect(beta.querySelector('.pcw-layouts-check')).toBeNull();
+    expect(beta.querySelector('.pcw-layouts-meta')!.textContent).toContain('BBB · 1h');
+    // Its search is the dialogs' search row.
+    expect(host.querySelector('.pcw-layouts-dialog .pcw-ss-search input')).not.toBeNull();
+  });
+
+  it('asks for a name on the first save, then saves the chart under it', async () => {
+    make();
+    FakeChart.last.drawings = ['line'];
+    const unused = new KeyboardEvent('keydown', { key: 's', ctrlKey: true, cancelable: true });
+    document.dispatchEvent(unused);
+    expect(unused.defaultPrevented).toBe(false);
+    press();
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 's', ctrlKey: true, cancelable: true }));
+    expect(prompt().closest('.pcw-modal-backdrop')!.hasAttribute('hidden')).toBe(false);
+    typeName('Swing');
+    submitName();
+    await flush();
+    const [saved] = await storage.list();
+    expect(saved).toMatchObject({ name: 'Swing', symbol: 'AAA', timeframe: '5m' });
+    const content = JSON.parse((await storage.load(saved.id))!.content);
+    expect(content).toMatchObject({ v: 1, symbol: 'AAA', scaleMode: 'regular', chart: { drawings: ['line'] } });
+    // The theme stays the viewer's, and the save time is not part of it.
+    expect(content.chart.theme).toBeUndefined();
+    expect(content.chart.timestamp).toBeUndefined();
+    expect(layoutsButton()!.textContent).toContain('Swing');
+  });
+
+  it('auto-saves the open layout as the chart changes', async () => {
+    make();
+    const saved = await widget.getLayoutSession()!.saveAs('A');
+    FakeChart.last.drawings = ['line', 'ray'];
+    FakeChart.last.emit('stateChange');
+    await settle();
+    expect(JSON.parse((await storage.load(saved.id))!.content).chart.drawings).toEqual(['line', 'ray']);
+  });
+
+  it('opens a layout: its symbol, interval, scale and chart', async () => {
+    make();
+    const content = JSON.stringify({
+      v: 1, symbol: 'BBB', timeframe: '1h', scaleMode: 'logarithmic', invertScale: false,
+      chart: { version: 2, chartType: 'line', drawings: ['fib'] },
+    });
+    await storage.save({ id: 'x', name: 'Saved', updatedAt: 1, content });
+    expect(await widget.openLayout('x')).toBe(true);
+    expect(host.querySelector('[data-role="symbol"]')!.textContent).toBe('BBB');
+    expect(FakeChart.last.drawings).toEqual(['fib']);
+    expect(FakeChart.last.scaleModes).toContain('logarithmic');
+    expect(layoutsButton()!.textContent).toContain('Saved');
+    expect(await widget.openLayout('missing')).toBe(false);
+  });
+
+  it('a layout carries the overlays but not the time zone', async () => {
+    make();
+    widget.setSettings({ volumeProfileVisible: true, crosshairMode: 'normal', timezone: 'Asia/Tokyo', numberLocale: 'de-DE' });
+    const content = JSON.parse(widget.getLayoutContent());
+    expect(content.settings).toMatchObject({ volumeProfileVisible: true, crosshairMode: 'normal', gridVisible: true });
+    // The viewer's own, and what the layout keeps elsewhere.
+    for (const key of ['timezone', 'numberLocale', 'scaleMode', 'invertScale', 'logScale', 'autoScale', 'chartTypeOptions']) {
+      expect(content.settings).not.toHaveProperty(key);
+    }
+  });
+
+  it('opens a layout with its Chart Settings, the viewer’s zone left as it is', async () => {
+    make();
+    const content = JSON.stringify({
+      v: 1, symbol: 'AAA', timeframe: '5m', scaleMode: 'regular', invertScale: false, chart: null,
+      settings: { volumeProfileVisible: true, crosshairMode: 'normal', timezone: 'Asia/Tokyo' },
+    });
+    expect(await widget.applyLayoutContent(content)).toBe(true);
+    expect(calls('setVolumeProfileVisible')).toEqual([true]);
+    expect(calls('setCrosshairMode')).toEqual(['normal']);
+    expect(calls('setTimeZone')).toEqual([]);
+  });
+
+  it('a layout saved before settings were kept leaves them as they are', async () => {
+    make();
+    const content = JSON.stringify({ v: 1, symbol: 'AAA', timeframe: '5m', scaleMode: 'regular', invertScale: false, chart: null });
+    expect(await widget.applyLayoutContent(content)).toBe(true);
+    expect(calls('setVolumeProfileVisible')).toEqual([]);
+    expect(calls('setCrosshairMode')).toEqual([]);
+  });
+
+  it('a settings change auto-saves the open layout', async () => {
+    make();
+    const saved = await widget.getLayoutSession()!.saveAs('A');
+    widget.setSettings({ volumeProfileVisible: true });
+    await settle();
+    expect(JSON.parse((await storage.load(saved.id))!.content).settings.volumeProfileVisible).toBe(true);
+  });
+
+  it('turns down content that is not a layout', async () => {
+    make();
+    expect(await widget.applyLayoutContent('{"v":2}')).toBe(false);
+    expect(await widget.applyLayoutContent('not json')).toBe(false);
+  });
+
+  it('lists layouts in a dialog, renames and deletes after asking', async () => {
+    make();
+    await storage.save({ id: 'a', name: 'Alpha', symbol: 'AAA', timeframe: '1h', updatedAt: 1, content: '{}' });
+    layoutsButton()!.click();
+    await flush();
+    pick('Open layout…');
+    await flush();
+    const row = () => host.querySelector<HTMLElement>('.pcw-layouts-row')!;
+    expect(row().querySelector('.pcw-layouts-name')!.textContent).toBe('Alpha');
+
+    row().querySelector<HTMLButtonElement>('[aria-label="Rename Alpha"]')!.click();
+    typeName('Beta');
+    submitName();
+    await flush();
+    expect((await storage.load('a'))!.name).toBe('Beta');
+
+    await flush();
+    row().querySelector<HTMLButtonElement>('[aria-label="Delete Beta"]')!.click();
+    expect(await storage.list()).toHaveLength(1); // asked first
+    row().querySelector<HTMLButtonElement>('.pcw-layouts-confirm')!.click();
+    await flush();
+    expect(await storage.list()).toEqual([]);
+    expect(host.querySelector('.pcw-layouts-list')!.textContent).toBe('No saved layouts yet');
+  });
+
+  it('closes the menu picked from “more” when “more” is pressed again, so two menus are never open', async () => {
+    make();
+    host.querySelector('.pcw-root')!.setAttribute('data-pcw-narrow', '');
+    const more = host.querySelector<HTMLButtonElement>('.pcw-toolbar-more')!;
+    const openMenus = () => [...host.querySelectorAll<HTMLElement>('.pcw-context-menu')].filter((menu) => !menu.hidden);
+    more.click();
+    menuItems().find((b) => b.textContent?.includes('Unnamed'))!.click();
+    await flush();
+    expect(openMenus().map((menu) => menu.getAttribute('aria-label'))).toEqual(['Layout']);
+    more.click();
+    expect(openMenus()).toEqual([]);
+  });
+
+  it('can be switched off', () => {
+    make({ layouts: false });
+    press();
+    expect(layoutsButton()).toBeNull();
+    const event = new KeyboardEvent('keydown', { key: 's', ctrlKey: true, cancelable: true });
+    document.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(false);
+  });
+});

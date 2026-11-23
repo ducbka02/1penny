@@ -1,0 +1,426 @@
+import type { ChartStyleOverrides, ChartType, ChartTypeOptions, DrawingState, IndicatorIntervals, IndicatorStyleConfig, PaneStyle, TradingOrder, TradingPosition, Theme } from '@1penny/commons';
+import { readChartStyleOverrides, readChartTypeOptions, readIndicatorPlotStyles, readPaneStyle } from '@1penny/commons';
+import { sanitizeDrawingStyle } from '@1penny/commons';
+import { readAlertOptions, type AlertCondition, type PriceAlert } from './AlertManager.js';
+import { cleanIntervals } from '../indicators/intervals.js';
+import { cleanDrawingName } from '../drawings/drawingState.js';
+
+/**
+ * Serializable chart state for save/load functionality.
+ * Contains everything needed to restore a chart to its exact state.
+ */
+export interface ChartSnapshot {
+  version: number;
+  timestamp: number;
+
+  // Chart config
+  symbol?: string;
+  timeframe?: string;
+  chartType: ChartType;
+
+  /** Settings of the chart types that build their own bars. */
+  chartTypeOptions?: ChartTypeOptions;
+
+  // Viewport
+  viewport: {
+    barWidth: number;
+    barSpacing: number;
+    offset: number;
+  };
+
+  // Visual
+  theme?: string | Theme;
+  /** The user's style overrides, by the name of the theme they go with (from version 3 on). */
+  overrides?: Record<string, ChartStyleOverrides>;
+  locale?: string;
+
+  // Indicators (captured from version 2 on; version-1 saves never had them)
+  indicators: SnapshotIndicator[];
+
+  // Drawings (fully serializable)
+  drawings: DrawingState[];
+
+  // Trading
+  orders: TradingOrder[];
+  positions: TradingPosition[];
+
+  // Alerts
+  alerts: PriceAlert[];
+}
+
+export interface SnapshotIndicator {
+  id: string;
+  /** The instance id when saved: alert channels (`<instanceId>:<key>`) refer to it. */
+  instanceId: string;
+  params: Record<string, unknown>;
+  /** Pane position for panel indicators. */
+  position?: string;
+  style?: IndicatorStyleConfig;
+  visible?: boolean;
+  /** Its own reference levels; absent = the indicator's defaults. */
+  levels?: number[];
+  /** The instance (id when saved) whose pane it is drawn in, when not its own. */
+  pane?: string;
+  /** `'left'`: an overlay on the left price scale. */
+  scale?: 'left';
+  /** The intervals it shows on; absent = all of them. */
+  intervals?: IndicatorIntervals;
+  /** Its pane's own background and separator. */
+  paneStyle?: PaneStyle;
+  /** For an indicator with a pane of its own: the pane's height, place among the panes, fold and maximise. */
+  paneSize?: number;
+  paneOrder?: number;
+  paneCollapsed?: boolean;
+  paneMaximized?: boolean;
+  /** The pane's value scale: logarithmic, upside down. */
+  paneLog?: boolean;
+  paneInvert?: boolean;
+  panePercent?: boolean;
+}
+
+/** A theme name long enough for any real one. */
+const MAX_THEME_NAME = 64;
+
+/**
+ * 2: indicators (params, pane, style, visibility) and full alerts (channel,
+ * repeating, label) are captured; version-1 saves carry no indicators.
+ * 3: the user's style overrides too.
+ */
+export const SNAPSHOT_VERSION = 3;
+const CURRENT_VERSION = SNAPSHOT_VERSION;
+
+function isObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+function asArray(v: unknown): unknown[] {
+  return Array.isArray(v) ? v : [];
+}
+
+function asString(v: unknown, fallback: string): string {
+  return typeof v === 'string' ? v : fallback;
+}
+
+function asNumber(v: unknown, fallback: number): number {
+  return typeof v === 'number' && Number.isFinite(v) ? v : fallback;
+}
+
+function validateDrawing(raw: unknown): DrawingState | null {
+  if (!isObject(raw)) return null;
+  if (typeof raw.id !== 'string' || typeof raw.type !== 'string') return null;
+  // A freehand stroke has the most points; more is not a chart's drawing.
+  if (!Array.isArray(raw.anchors) || raw.anchors.length === 0 || raw.anchors.length > MAX_ANCHORS) return null;
+  if (!isObject(raw.style)) return null;
+
+  const anchors: DrawingState['anchors'] = [];
+  for (const a of raw.anchors) {
+    if (!isObject(a)) return null;
+    if (typeof a.time !== 'number' || typeof a.price !== 'number') return null;
+    if (!Number.isFinite(a.time) || !Number.isFinite(a.price)) return null;
+    anchors.push({ time: a.time, price: a.price });
+  }
+
+  // Every field of the style is checked: the settings dialog and the
+  // renderers take them as they are.
+  const style = sanitizeDrawingStyle(raw.style);
+  if (style.color === undefined || style.lineWidth === undefined) return null;
+
+  return {
+    id: raw.id,
+    type: raw.type as DrawingState['type'],
+    anchors,
+    style: { lineStyle: 'solid', ...style, color: style.color, lineWidth: style.lineWidth },
+    visible: typeof raw.visible === 'boolean' ? raw.visible : true,
+    locked: typeof raw.locked === 'boolean' ? raw.locked : false,
+    // Checked against the tool when the drawings are set on a chart.
+    options: isObject(raw.options) ? (raw.options as DrawingState['options']) : undefined,
+    intervals: cleanIntervals(raw.intervals) ?? undefined,
+    group: validateGroup(raw.group),
+    ...(cleanDrawingName(raw.name) !== undefined ? { name: cleanDrawingName(raw.name) } : {}),
+    // The indicator pane it is drawn on, by its id; the chart drops it when there is no such pane.
+    ...(typeof raw.paneId === 'string' && raw.paneId.length > 0 && raw.paneId.length <= MAX_PANE_ID ? { paneId: raw.paneId } : {}),
+    meta: isObject(raw.meta) ? raw.meta : undefined,
+  };
+}
+
+const MAX_ANCHORS = 5000;
+/** Longest pane id kept: an indicator's instance id is far shorter. */
+const MAX_PANE_ID = 200;
+const MAX_GROUP_ID = 64;
+const MAX_GROUP_NAME = 80;
+
+function validateGroup(raw: unknown): DrawingState['group'] {
+  if (!isObject(raw) || typeof raw.id !== 'string' || typeof raw.name !== 'string') return undefined;
+  if (raw.id === '' || raw.id.length > MAX_GROUP_ID) return undefined;
+  return { id: raw.id, name: raw.name.slice(0, MAX_GROUP_NAME) };
+}
+
+function validateOrder(raw: unknown): TradingOrder | null {
+  if (!isObject(raw)) return null;
+  if (typeof raw.id !== 'string' || typeof raw.side !== 'string') return null;
+  if (typeof raw.type !== 'string' || typeof raw.price !== 'number') return null;
+  if (typeof raw.quantity !== 'number') return null;
+  return raw as unknown as TradingOrder;
+}
+
+function validateIndicatorStyle(raw: unknown): IndicatorStyleConfig | undefined {
+  if (!isObject(raw)) return undefined;
+  const style: IndicatorStyleConfig = {};
+  // Empty lists would blank the indicator's own defaults, so they are dropped.
+  const colors = asArray(raw.colors).filter((c): c is string => typeof c === 'string');
+  if (colors.length > 0) style.colors = colors;
+  const lineWidths = asArray(raw.lineWidths).filter((w): w is number => typeof w === 'number' && Number.isFinite(w) && w > 0);
+  if (lineWidths.length > 0) style.lineWidths = lineWidths;
+  if (typeof raw.opacity === 'number' && Number.isFinite(raw.opacity)) style.opacity = Math.min(1, Math.max(0, raw.opacity));
+  const plots = readIndicatorPlotStyles(raw.plots);
+  if (plots) style.plots = plots;
+  return Object.keys(style).length > 0 ? style : undefined;
+}
+
+const ALERT_CONDITIONS: readonly AlertCondition[] = ['crossingUp', 'crossingDown', 'crossing', 'greaterThan', 'lessThan', 'movesUp', 'movesDown'];
+
+function validateAlert(raw: unknown): PriceAlert | null {
+  if (!isObject(raw) || typeof raw.id !== 'string') return null;
+  // An alert on a drawing follows the drawing: its price is only the last level seen.
+  const drawingId = typeof raw.drawingId === 'string' ? raw.drawingId : undefined;
+  const price = typeof raw.price === 'number' && Number.isFinite(raw.price) ? raw.price : null;
+  const condition = ALERT_CONDITIONS.find((c) => c === raw.condition) ?? 'crossing';
+  const options = readAlertOptions(raw);
+  // A line against a line, or a move, needs no level of its own.
+  const levelFree = options.target !== undefined || condition === 'movesUp' || condition === 'movesDown';
+  if (price === null && !drawingId && !levelFree) return null;
+  return {
+    id: raw.id,
+    price: price ?? Number.NaN,
+    drawingId,
+    condition,
+    message: typeof raw.message === 'string' ? raw.message : undefined,
+    triggered: raw.triggered === true,
+    repeating: raw.repeating === true,
+    channel: asString(raw.channel, 'price'),
+    label: typeof raw.label === 'string' ? raw.label : undefined,
+    ...options,
+    ...(raw.expired === true ? { expired: true } : {}),
+  };
+}
+
+function validatePosition(raw: unknown): TradingPosition | null {
+  if (!isObject(raw)) return null;
+  if (typeof raw.id !== 'string' || typeof raw.side !== 'string') return null;
+  if (typeof raw.entryPrice !== 'number' || typeof raw.quantity !== 'number') return null;
+  return raw as unknown as TradingPosition;
+}
+
+/** The tallest pane a stored layout may ask for (px); the layout keeps it within the chart too. */
+const MAX_PANE_SIZE = 4000;
+
+/** The user's overrides by theme name, the keys and values each knows; what it can't read is left out. */
+function validateOverrides(raw: unknown): Record<string, ChartStyleOverrides> | undefined {
+  if (!isObject(raw)) return undefined;
+  const out: Record<string, ChartStyleOverrides> = {};
+  const rejected: string[] = [];
+  for (const [name, layer] of Object.entries(raw)) {
+    const read = readChartStyleOverrides(layer);
+    rejected.push(...read.rejected);
+    // A save holds values: a null (take away) means nothing here.
+    const values = Object.fromEntries(Object.entries(read.overrides).filter(([, v]) => v !== null)) as ChartStyleOverrides;
+    if (Object.keys(values).length > 0) out[name.slice(0, MAX_THEME_NAME)] = values;
+  }
+  if (rejected.length > 0) console.warn(`Saved style overrides left out: ${[...new Set(rejected)].join(', ')}`);
+  return out;
+}
+
+export function validateSnapshot(raw: unknown): ChartSnapshot {
+  if (!isObject(raw)) {
+    return emptySnapshot();
+  }
+
+  if (typeof raw.version === 'number' && raw.version > CURRENT_VERSION) {
+    console.warn(`Chart state from a newer version (${raw.version}); loading what this version understands.`);
+  }
+
+  const viewport = isObject(raw.viewport) ? raw.viewport : {};
+
+  const indicators: ChartSnapshot['indicators'] = [];
+  for (const ind of asArray(raw.indicators)) {
+    if (!isObject(ind)) continue;
+    if (typeof ind.id !== 'string' || typeof ind.instanceId !== 'string') continue;
+    if (!isObject(ind.params)) continue;
+    indicators.push({
+      id: ind.id,
+      instanceId: ind.instanceId,
+      params: ind.params,
+      position: typeof ind.position === 'string' ? ind.position : undefined,
+      style: validateIndicatorStyle(ind.style),
+      visible: typeof ind.visible === 'boolean' ? ind.visible : undefined,
+      levels: Array.isArray(ind.levels)
+        ? ind.levels.filter((v): v is number => typeof v === 'number' && Number.isFinite(v))
+        : undefined,
+      pane: typeof ind.pane === 'string' ? ind.pane : undefined,
+      scale: ind.scale === 'left' ? 'left' : undefined,
+      intervals: cleanIntervals(ind.intervals) ?? undefined,
+      paneStyle: readPaneStyle(ind.paneStyle) ?? undefined,
+      paneSize: typeof ind.paneSize === 'number' && Number.isFinite(ind.paneSize) && ind.paneSize > 0 ? Math.min(ind.paneSize, MAX_PANE_SIZE) : undefined,
+      paneOrder: typeof ind.paneOrder === 'number' && Number.isInteger(ind.paneOrder) && ind.paneOrder >= 0 ? ind.paneOrder : undefined,
+      paneCollapsed: ind.paneCollapsed === true ? true : undefined,
+      paneMaximized: ind.paneMaximized === true ? true : undefined,
+      paneLog: ind.paneLog === true ? true : undefined,
+      paneInvert: ind.paneInvert === true ? true : undefined,
+      panePercent: ind.panePercent === true ? true : undefined,
+    });
+  }
+
+  const drawings: DrawingState[] = [];
+  for (const d of asArray(raw.drawings)) {
+    const v = validateDrawing(d);
+    if (v) drawings.push(v);
+  }
+
+  const orders: TradingOrder[] = [];
+  for (const o of asArray(raw.orders)) {
+    const v = validateOrder(o);
+    if (v) orders.push(v);
+  }
+
+  const positions: TradingPosition[] = [];
+  for (const p of asArray(raw.positions)) {
+    const v = validatePosition(p);
+    if (v) positions.push(v);
+  }
+
+  const alerts: PriceAlert[] = [];
+  for (const a of asArray(raw.alerts)) {
+    const v = validateAlert(a);
+    if (v) alerts.push(v);
+  }
+
+  const overrides = validateOverrides(raw.overrides);
+
+  return {
+    // Without an indicators list there is nothing to restore them from: read
+    // it as version 1, which leaves the chart's indicators alone.
+    version: typeof raw.version === 'number' && Array.isArray(raw.indicators) ? raw.version : 1,
+    timestamp: asNumber(raw.timestamp, Date.now()),
+    symbol: typeof raw.symbol === 'string' ? raw.symbol : undefined,
+    timeframe: typeof raw.timeframe === 'string' ? raw.timeframe : undefined,
+    chartType: asString(raw.chartType, 'candlestick') as ChartType,
+    ...(raw.chartTypeOptions !== undefined ? { chartTypeOptions: readChartTypeOptions(raw.chartTypeOptions) } : {}),
+    viewport: {
+      barWidth: asNumber(viewport.barWidth, 8),
+      barSpacing: asNumber(viewport.barSpacing, 2),
+      offset: asNumber(viewport.offset, 0),
+    },
+    theme: typeof raw.theme === 'string' ? raw.theme : undefined,
+    ...(overrides ? { overrides } : {}),
+    locale: typeof raw.locale === 'string' ? raw.locale : undefined,
+    indicators,
+    drawings,
+    orders,
+    positions,
+    alerts,
+  };
+}
+
+/** What unreadable input becomes. Version 1: it holds no indicators to restore. */
+function emptySnapshot(): ChartSnapshot {
+  return {
+    version: 1,
+    timestamp: Date.now(),
+    chartType: 'candlestick',
+    viewport: { barWidth: 8, barSpacing: 2, offset: 0 },
+    indicators: [],
+    drawings: [],
+    orders: [],
+    positions: [],
+    alerts: [],
+  };
+}
+
+export class ChartStateManager {
+  /**
+   * Capture current chart state as a serializable snapshot.
+   */
+  static capture(chart: {
+    getDrawings: () => DrawingState[];
+    getOrders?: () => TradingOrder[];
+    getPositions?: () => TradingPosition[];
+    getAlerts?: () => PriceAlert[];
+    getTheme: () => Theme;
+    getIndicators?: () => SnapshotIndicator[];
+    /** The user's style overrides by theme name. */
+    getOverrides?: () => Record<string, ChartStyleOverrides>;
+  }, meta?: { symbol?: string; timeframe?: string; chartType?: ChartType; chartTypeOptions?: ChartTypeOptions }): ChartSnapshot {
+    return {
+      // Version 2 promises the indicator list; without `getIndicators` it is a version-1 save.
+      version: chart.getIndicators ? CURRENT_VERSION : 1,
+      timestamp: Date.now(),
+      chartType: meta?.chartType ?? 'candlestick',
+      ...(meta?.chartTypeOptions && Object.keys(meta.chartTypeOptions).length > 0 ? { chartTypeOptions: meta.chartTypeOptions } : {}),
+      symbol: meta?.symbol,
+      timeframe: meta?.timeframe,
+      viewport: { barWidth: 8, barSpacing: 2, offset: 0 },
+      theme: chart.getTheme().name,
+      ...(chart.getOverrides && Object.keys(chart.getOverrides()).length > 0 ? { overrides: chart.getOverrides() } : {}),
+      indicators: chart.getIndicators?.() ?? [],
+      drawings: chart.getDrawings(),
+      orders: chart.getOrders?.() ?? [],
+      positions: chart.getPositions?.() ?? [],
+      alerts: chart.getAlerts?.() ?? [],
+    };
+  }
+
+  /** Serialize to JSON string */
+  static serialize(snapshot: ChartSnapshot): string {
+    return JSON.stringify(snapshot);
+  }
+
+  /**
+   * Deserialize from JSON string. Validates the top-level shape and filters
+   * malformed array entries instead of trusting `JSON.parse`. Missing or
+   * wrong-typed fields fall back to safe defaults so older saves still load.
+   */
+  static deserialize(json: string): ChartSnapshot {
+    const raw: unknown = JSON.parse(json);
+    return validateSnapshot(raw);
+  }
+
+  /** Save to localStorage */
+  static saveToStorage(key: string, snapshot: ChartSnapshot): void {
+    localStorage.setItem(key, this.serialize(snapshot));
+  }
+
+  /** Load from localStorage */
+  static loadFromStorage(key: string): ChartSnapshot | null {
+    const json = localStorage.getItem(key);
+    return json ? this.deserialize(json) : null;
+  }
+
+  /** Download as JSON file */
+  static downloadFile(snapshot: ChartSnapshot, filename = '1p-chart-state.json'): void {
+    const blob = new Blob([this.serialize(snapshot)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  }
+
+  /** Load from file (returns promise) */
+  static loadFromFile(): Promise<ChartSnapshot> {
+    return new Promise((resolve, reject) => {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = '.json';
+      input.onchange = async () => {
+        const file = input.files?.[0];
+        if (!file) { reject(new Error('No file selected')); return; }
+        const text = await file.text();
+        resolve(this.deserialize(text));
+      };
+      input.click();
+    });
+  }
+}

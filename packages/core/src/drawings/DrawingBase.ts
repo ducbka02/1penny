@@ -1,0 +1,289 @@
+import type {
+  DrawingPlugin,
+  DrawingDescriptor,
+  DrawingLevel,
+  DrawingOptionValue,
+  DrawingState,
+  DrawingStyle,
+  Point,
+  ViewportState,
+  AnchorPoint,
+} from '@1penny/commons';
+import { crispX, crispY } from '../charts/pixelGrid.js';
+import { drawAnchorHandles } from './handles.js';
+import { dashFor } from './drawingLook.js';
+import { isScreenAnchored, pixelToScreenPoint, screenPointToPixel } from './screenAnchors.js';
+import { priceToY, resolveBarIndex, timeToX, xToTime, yToPrice } from '../viewport/ScaleMapping.js';
+
+/**
+ * How a line is straight on the chart: along `at` (a time's bar position, or
+ * the time itself) and `value` (log price on a log scale, else price).
+ */
+export interface LineSpace {
+  at(time: number): number;
+  value(price: number): number;
+  price(value: number): number;
+}
+
+const PLAIN_SPACE: LineSpace = { at: (time) => time, value: (price) => price, price: (value) => value };
+
+/** The space lines are straight in on this chart; plain time and price without a viewport. */
+export function lineSpace(viewport?: ViewportState): LineSpace {
+  if (!viewport) return PLAIN_SPACE;
+  const { min, max } = viewport.priceRange;
+  const log = viewport.logScale === true && min > 0 && max > 0;
+  return {
+    at: (time) => resolveBarIndex(time, viewport),
+    value: log ? (price) => Math.log(Math.max(price, Number.EPSILON)) : (price) => price,
+    price: log ? Math.exp : (value) => value,
+  };
+}
+
+/** How far `point` is from the segment `p1`–`p2` (px). */
+export function distanceToSegment(point: Point, p1: Point, p2: Point): number {
+  const dx = p2.x - p1.x;
+  const dy = p2.y - p1.y;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq === 0) return Math.hypot(point.x - p1.x, point.y - p1.y);
+  const t = Math.max(0, Math.min(1, ((point.x - p1.x) * dx + (point.y - p1.y) * dy) / lenSq));
+  return Math.hypot(point.x - (p1.x + t * dx), point.y - (p1.y + t * dy));
+}
+
+/** Whether `point` is within `tolerance` of the line through `pts` (and back to the start, with `close`). */
+export function nearPolyline(point: Point, pts: readonly Point[], tolerance: number, close = false): boolean {
+  for (let i = 0; i < pts.length - 1; i++) {
+    if (distanceToSegment(point, pts[i], pts[i + 1]) <= tolerance) return true;
+  }
+  return close && pts.length > 2 && distanceToSegment(point, pts[pts.length - 1], pts[0]) <= tolerance;
+}
+
+/** Whether a stored option value is of the kind its definition takes. */
+function optionKindMatches(def: NonNullable<DrawingDescriptor['options']>[string], value: unknown): boolean {
+  switch (def.kind) {
+    case 'boolean': return typeof value === 'boolean';
+    case 'number': return typeof value === 'number' && Number.isFinite(value);
+    case 'levels': return Array.isArray(value);
+    default: return typeof value === 'string';
+  }
+}
+
+/** How strongly a tool's secondary lines show. */
+const GUIDE_ALPHA = 0.55;
+
+export abstract class DrawingBase implements DrawingPlugin {
+  abstract descriptor: DrawingDescriptor;
+
+  abstract render(
+    ctx: CanvasRenderingContext2D,
+    state: DrawingState,
+    viewport: ViewportState,
+    selected: boolean,
+  ): void;
+
+  abstract hitTest(
+    point: Point,
+    state: DrawingState,
+    viewport: ViewportState,
+    tolerance: number,
+  ): boolean;
+
+  hitTestAnchor(
+    point: Point,
+    state: DrawingState,
+    viewport: ViewportState,
+    tolerance: number,
+  ): number {
+    // The nearest in reach: on a small drawing two handles can both be in reach of the pointer.
+    let best = -1;
+    let bestDist = Infinity;
+    const handles = this.handlePoints(state, viewport);
+    for (let i = 0; i < handles.length; i++) {
+      const px = handles[i];
+      const dist = Math.hypot(point.x - px.x, point.y - px.y);
+      if (dist <= tolerance && dist < bestDist) {
+        best = i;
+        bestDist = dist;
+      }
+    }
+    return best;
+  }
+
+  /** One of the drawing's options (see `descriptor.options`), its default when unset. */
+  protected option<T extends DrawingOptionValue>(state: DrawingState, key: string): T {
+    // Options are cleaned on the way in (added, loaded, updated), so a read
+    // runs every frame without copying; a value of the wrong kind still
+    // falls back to the default. Callers must not change what they get.
+    const def = this.descriptor.options?.[key];
+    const own = state.options?.[key];
+    if (!def) return own as T;
+    return (own !== undefined && optionKindMatches(def, own) ? own : def.default) as T;
+  }
+
+  /** `option` for one drawing, for helpers that read several of its options. */
+  protected optionsOf(state: DrawingState): <T extends DrawingOptionValue>(key: string) => T {
+    return <T extends DrawingOptionValue>(key: string) => this.option<T>(state, key);
+  }
+
+  /** The levels turned on, in order. */
+  protected visibleLevels(state: DrawingState, key = 'levels'): DrawingLevel[] {
+    return this.option<DrawingLevel[]>(state, key).filter((level) => level.visible && Number.isFinite(level.value));
+  }
+
+  /** The line from `p1` to `p2`, carried to the edge of the chart past either end when asked. */
+  protected extendLine(p1: Point, p2: Point, viewport: ViewportState, left: boolean, right: boolean): [Point, Point] {
+    const dx = p2.x - p1.x;
+    const dy = p2.y - p1.y;
+    const len = Math.hypot(dx, dy);
+    if (len === 0 || (!left && !right)) return [p1, p2];
+    const reach = Math.hypot(viewport.chartRect.width, viewport.chartRect.height) * 2;
+    const ux = (dx / len) * reach;
+    const uy = (dy / len) * reach;
+    return [
+      left ? { x: p1.x - ux, y: p1.y - uy } : p1,
+      right ? { x: p2.x + ux, y: p2.y + uy } : p2,
+    ];
+  }
+
+  /**
+   * The price on the line through `a` and `b` at `time`: between the anchors,
+   * or past `a` / past `b` when the line is extended that way. Null elsewhere,
+   * or for a vertical line. `space` is the one the line is straight in.
+   */
+  protected linePriceAt(
+    a: AnchorPoint,
+    b: AnchorPoint,
+    time: number,
+    pastA: boolean,
+    pastB: boolean,
+    space: LineSpace = PLAIN_SPACE,
+  ): number | null {
+    const value = this.lineValueAt(a, b, time, pastA, pastB, space);
+    return value === null ? null : space.price(value);
+  }
+
+  /** `linePriceAt` in `space`'s values (log price on a log scale). */
+  protected lineValueAt(
+    a: AnchorPoint,
+    b: AnchorPoint,
+    time: number,
+    pastA: boolean,
+    pastB: boolean,
+    space: LineSpace,
+  ): number | null {
+    const atA = space.at(a.time);
+    const atB = space.at(b.time);
+    if (atA === atB) return null;
+    const t = (space.at(time) - atA) / (atB - atA); // 0 at a, 1 at b
+    if (!Number.isFinite(t) || (t < 0 && !pastA) || (t > 1 && !pastB)) return null;
+    const valueA = space.value(a.price);
+    return valueA + (space.value(b.price) - valueA) * t;
+  }
+
+  protected anchorToPixel(anchor: AnchorPoint, viewport: ViewportState): Point {
+    // A tool kept to the screen holds its points as shares of the plot.
+    if (isScreenAnchored(this.descriptor)) return screenPointToPixel(anchor, viewport);
+    const x = timeToX(anchor.time, viewport);
+    const y = priceToY(anchor.price, viewport);
+    return { x, y };
+  }
+
+  protected pixelToAnchor(point: Point, viewport: ViewportState): AnchorPoint {
+    if (isScreenAnchored(this.descriptor)) return pixelToScreenPoint(point, viewport);
+    const time = xToTime(point.x, viewport);
+    const price = yToPrice(point.y, viewport);
+    return { time, price };
+  }
+
+  protected applyLineStyle(ctx: CanvasRenderingContext2D, style: DrawingStyle): void {
+    ctx.strokeStyle = style.color;
+    ctx.lineWidth = style.lineWidth;
+    // Corners turn round, which reads softer than mitred points. A solid line's ends are round
+    // too, so a thick one doesn't end cut off; dots are round dots on a round cap. Dashes keep
+    // square ends, which round caps would eat into every gap of.
+    ctx.lineCap = style.lineStyle === 'dashed' ? 'butt' : 'round';
+    ctx.lineJoin = 'round';
+    // Dashes and dots in proportion to the line, so a thick dotted line is still dots.
+    ctx.setLineDash(dashFor(style.lineStyle, style.lineWidth));
+  }
+
+  /** A horizontal line from `x0` to `x1` at `y`, on whole device pixels (sharp, not smeared). */
+  protected strokeHorizontal(ctx: CanvasRenderingContext2D, x0: number, x1: number, y: number): void {
+    const line = crispY(ctx, y, Number(ctx.lineWidth) || 1);
+    ctx.lineWidth = line.width;
+    ctx.beginPath();
+    ctx.moveTo(x0, line.y);
+    ctx.lineTo(x1, line.y);
+    ctx.stroke();
+  }
+
+  /** A vertical line from `y0` to `y1` at `x`, on whole device pixels. */
+  protected strokeVertical(ctx: CanvasRenderingContext2D, x: number, y0: number, y1: number): void {
+    const line = crispX(ctx, x, Number(ctx.lineWidth) || 1);
+    ctx.lineWidth = line.width;
+    ctx.beginPath();
+    ctx.moveTo(line.x, y0);
+    ctx.lineTo(line.x, y1);
+    ctx.stroke();
+  }
+
+  protected resetLineStyle(ctx: CanvasRenderingContext2D): void {
+    ctx.setLineDash([]);
+    ctx.lineCap = 'butt';
+    ctx.lineJoin = 'miter';
+  }
+
+  /**
+   * Where the drawing's handles are on screen, one per anchor: at its anchors, unless a tool
+   * shows them elsewhere (a time tool's by the plot's foot, a fitted line's on the line).
+   */
+  protected handlePoints(state: DrawingState, viewport: ViewportState): Point[] {
+    return state.anchors.map((anchor) => this.anchorToPixel(anchor, viewport));
+  }
+
+  /**
+   * Handles of a tool that only sets times (vertical lines): on their lines halfway up the plot,
+   * not at the anchors' prices, which mean nothing to it. There they keep clear of the legend
+   * at the top, and at the foot of a pane divider's touch reach and the buttons over the time axis.
+   */
+  protected timeHandles(state: DrawingState, viewport: ViewportState): Point[] {
+    const middle = viewport.chartRect.y + viewport.chartRect.height / 2;
+    return state.anchors.map((anchor) => ({ x: this.anchorToPixel(anchor, viewport).x, y: middle }));
+  }
+
+  /** A rectangle's outline on whole device pixels, each side one sharp row or column. */
+  protected strokeCrispRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number): void {
+    const left = Math.min(x, x + w);
+    const right = Math.max(x, x + w);
+    const top = Math.min(y, y + h);
+    const bottom = Math.max(y, y + h);
+    this.strokeHorizontal(ctx, left, right, top);
+    this.strokeHorizontal(ctx, left, right, bottom);
+    this.strokeVertical(ctx, left, top, bottom);
+    this.strokeVertical(ctx, right, top, bottom);
+  }
+
+  /** A tool's secondary lines (grids, guides): 1 px in `color`, lighter than its own lines. */
+  protected applyGuideStyle(ctx: CanvasRenderingContext2D, color: string, dashed = false): void {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1;
+    ctx.lineCap = 'butt';
+    ctx.globalAlpha = GUIDE_ALPHA;
+    ctx.setLineDash(dashed ? dashFor('guide', 1) : []);
+  }
+
+  protected renderAnchorHandles(ctx: CanvasRenderingContext2D, state: DrawingState, viewport: ViewportState): void {
+    drawAnchorHandles(ctx, state, this.handlePoints(state, viewport));
+  }
+
+  protected distanceToLine(point: Point, p1: Point, p2: Point): number {
+    return distanceToSegment(point, p1, p2);
+  }
+
+  protected distanceToInfiniteLine(point: Point, p1: Point, p2: Point): number {
+    const dx = p2.x - p1.x;
+    const dy = p2.y - p1.y;
+    const len = Math.hypot(dx, dy);
+    if (len === 0) return Math.hypot(point.x - p1.x, point.y - p1.y);
+    return Math.abs(dx * (p1.y - point.y) - dy * (p1.x - point.x)) / len;
+  }
+}

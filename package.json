@@ -1,0 +1,37 @@
+{
+  "name": "1penny-monorepo",
+  "private": true,
+  "version": "0.1.0",
+  "description": "1Penny high-performance Canvas 2D & WebGL 2 trading chart, indicator, drawing, replay, and analytics monorepo. Zero runtime dependencies.",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ducbka02/1penny.git"
+  },
+  "scripts": {
+    "build": "pnpm -r build",
+    "dev": "pnpm -r --parallel dev",
+    "clean": "pnpm -r clean",
+    "test": "pnpm --filter \"./packages/*\" run --if-present test",
+    "typecheck": "pnpm --filter \"./packages/*\" exec tsc --noEmit",
+    "docs:gen": "node scripts/gen-ai-docs.mjs",
+    "docs:check": "node scripts/gen-ai-docs.mjs --check && node scripts/check-skill-examples.mjs",
+    "test:scripts": "node --test scripts/mcp-catalog.test.mjs",
+    "bench": "pnpm --filter @1penny/core exec vitest bench --run",
+    "bench:render": "node scripts/bench-render.mjs",
+    "soak": "node scripts/soak.mjs",
+    "audit:scenes": "node scripts/audit-scenes.mjs",
+    "audit:finance": "node scripts/audit-finance.mjs",
+    "size": "node scripts/size-report.mjs"
+  },
+  "devDependencies": {
+    "typescript": "~5.9.3",
+    "vite": "^8.0.1",
+    "vite-plugin-dts": "^4.5.4"
+  },
+  "packageManager": "pnpm@9.15.0",
+  "engines": {
+    "node": ">=20.19"
+  }
+}

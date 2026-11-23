@@ -1,0 +1,9 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.DS_Store
+*.log
+coverage/
+.svelte-kit/
+skills/1penny/.check/
+packages/mcp/server.json

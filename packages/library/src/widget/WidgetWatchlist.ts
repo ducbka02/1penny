@@ -1,0 +1,634 @@
+import type { WatchlistList } from './WatchlistStore.js';
+import { fill } from './i18n.js';
+import { createIcon } from './icons.js';
+import { logoSrc } from './symbolCatalog.js';
+import type { SymbolInfo } from '@1penny/commons';
+import { MAX_PRICE_DECIMALS, smallValueDecimals } from '@1penny/commons';
+
+/**
+ * Watchlist sidebar: the shown list's symbols, a line each: the ticker (its
+ * venue left to the tooltip), last price, the move and the % change, under
+ * the columns' names; a mini sparkline when asked for. A menu switches, creates, renames and deletes lists;
+ * rows are added, removed and reordered (drag, or Alt+↑/↓). It only renders
+ * and reports: the widget keeps the lists (see WatchlistStore).
+ *
+ * The widget tracks the chart's symbol from the live stream, and fills the
+ * other rows from a quote source or what the host pushes (`setEntry`).
+ */
+export interface WatchlistEntry {
+  symbol: string;
+  lastPrice?: number;
+  /** The price the move and its % are read against: the close before the day, or 24 h ago. */
+  refPrice?: number;
+  /** Recent close samples for the sparkline — last point is the live price. */
+  sparkline?: number[];
+}
+
+export interface WatchlistCallbacks {
+  onSelect: (symbol: string) => void;
+  /** "+": add a symbol to the shown list (the widget opens its symbol search). */
+  onAdd?: () => void;
+  onRemove?: (symbol: string) => void;
+  /** Move a symbol to `index` in the shown list. */
+  onMove?: (symbol: string, index: number) => void;
+  onPickList?: (id: string) => void;
+  onCreateList?: (name: string) => void;
+  onRenameList?: (id: string, name: string) => void;
+  onDeleteList?: (id: string) => void;
+  /** A close button in its header, for the dock it sits in. */
+  onClose?: () => void;
+}
+
+export interface WatchlistLabels {
+  title: string;
+  lists: string;
+  newList: string;
+  rename: string;
+  deleteList: string;
+  /** `{name}`: the list's name. */
+  confirmDelete: string;
+  add: string;
+  /** `{symbol}`. */
+  remove: string;
+  empty: string;
+  listName: string;
+  /** The close button's name. */
+  close?: string;
+  /** The names over the columns; without them the list has no head row. */
+  columns?: { symbol: string; price: string; move: string; change: string };
+}
+
+interface RowRef {
+  row: HTMLDivElement;
+  priceEl: HTMLSpanElement;
+  /** The move from the reference price, in price. */
+  moveEl: HTMLSpanElement | null;
+  /** The same move, in percent. */
+  changeEl: HTMLSpanElement;
+  sparkCanvas: HTMLCanvasElement | null;
+}
+
+/** The cells of a row, and of the head over them. */
+type WatchlistCell = 'symbol' | 'spark' | 'price' | 'move' | 'change' | 'remove';
+
+export interface WatchlistViewOptions {
+  /** A small chart of recent prices in each row. Default `false`: the row's figures only. */
+  sparkline?: boolean;
+  /** What the widget knows of a symbol: a row shows its `logo` before the ticker, when it has one. */
+  infoOf?: (symbol: string) => SymbolInfo | undefined;
+}
+
+export class WidgetWatchlist {
+  private el: HTMLDivElement;
+  private headerEl: HTMLDivElement;
+  private nameBtn: HTMLButtonElement;
+  private menuEl: HTMLDivElement;
+  private listEl: HTMLDivElement;
+  private headEl: HTMLDivElement | null;
+  private rowMap = new Map<string, RowRef>();
+  private entries = new Map<string, WatchlistEntry>();
+  private lists: WatchlistList[] = [];
+  private activeList = '';
+  private active: string | null = null;
+  private locale: string | undefined;
+  private dragging: string | null = null;
+  private readonly onOutside = (e: MouseEvent) => {
+    if (!this.headerEl.contains(e.target as Node)) this.closeMenu();
+  };
+
+  constructor(
+    host: HTMLElement,
+    private readonly callbacks: WatchlistCallbacks,
+    private readonly labels: WatchlistLabels,
+    private readonly options: WatchlistViewOptions = {},
+  ) {
+    this.el = document.createElement('div');
+    this.el.className = 'pcw-watchlist';
+    this.el.setAttribute('aria-label', labels.title);
+
+    this.headerEl = document.createElement('div');
+    this.headerEl.className = 'pcw-watchlist-header';
+
+    this.nameBtn = document.createElement('button');
+    this.nameBtn.type = 'button';
+    this.nameBtn.className = 'pcw-watchlist-name';
+    this.nameBtn.setAttribute('aria-haspopup', 'menu');
+    this.nameBtn.setAttribute('aria-expanded', 'false');
+    this.nameBtn.title = labels.lists;
+    this.nameBtn.addEventListener('click', () => (this.menuEl.hidden ? this.openMenu() : this.closeMenu()));
+
+    const addBtn = document.createElement('button');
+    addBtn.type = 'button';
+    addBtn.className = 'pcw-watchlist-add';
+    addBtn.innerHTML = createIcon('plus', 14);
+    addBtn.title = labels.add;
+    addBtn.setAttribute('aria-label', labels.add);
+    addBtn.hidden = !callbacks.onAdd;
+    addBtn.addEventListener('click', () => callbacks.onAdd?.());
+
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.className = 'pcw-watchlist-close';
+    closeBtn.setAttribute('aria-label', labels.close ?? labels.title);
+    closeBtn.innerHTML = createIcon('x', 14);
+    closeBtn.hidden = !callbacks.onClose;
+    closeBtn.addEventListener('click', () => callbacks.onClose?.());
+
+    this.menuEl = document.createElement('div');
+    this.menuEl.className = 'pcw-dropdown pcw-watchlist-menu';
+    this.menuEl.setAttribute('role', 'menu');
+    this.menuEl.hidden = true;
+
+    this.headerEl.append(this.nameBtn, addBtn, closeBtn, this.menuEl);
+    this.el.appendChild(this.headerEl);
+
+    this.listEl = document.createElement('div');
+    this.listEl.className = 'pcw-watchlist-list';
+    this.listEl.setAttribute('role', 'list');
+    // One grid for the head and every row: between a gutter at each edge, the name, three
+    // figures (the price, the move and the change; with a sparkline, the chart, the price and
+    // the change), and the remove button's room.
+    const columns = [
+      'var(--1p-watchlist-gutter)', 'minmax(0, 1fr)', 'auto', 'auto', 'auto',
+      ...(callbacks.onRemove ? ['var(--1p-watchlist-remove)'] : []), 'var(--1p-watchlist-gutter)',
+    ];
+    this.listEl.style.setProperty('--1p-watchlist-columns', columns.join(' '));
+    this.el.appendChild(this.listEl);
+    this.headEl = this.makeHead();
+
+    host.appendChild(this.el);
+  }
+
+  /** The panel, for the dock to hold. */
+  get element(): HTMLElement {
+    return this.el;
+  }
+
+  /** The lists, and which one shows. Rows are diffed so prices stay. */
+  setLists(lists: WatchlistList[], activeId: string): void {
+    this.lists = lists.map((l) => ({ ...l, symbols: [...l.symbols] }));
+    this.activeList = lists.some((l) => l.id === activeId) ? activeId : lists[0]?.id ?? '';
+    const shown = this.shownList();
+    this.nameBtn.textContent = shown?.name ?? this.labels.title;
+    this.renderRows(shown?.symbols ?? []);
+    if (!this.menuEl.hidden) this.renderMenu();
+  }
+
+  /** Draw every row again (its sparkline at its size, once the list shows). */
+  redraw(): void {
+    for (const symbol of this.rowMap.keys()) this.renderRow(symbol);
+  }
+
+  /** Set the BCP 47 locale used for price/percent formatting. */
+  setLocale(locale: string | undefined): void {
+    this.locale = locale;
+    for (const symbol of this.rowMap.keys()) this.renderRow(symbol);
+  }
+
+  /** The chart's symbol, marked in the list. */
+  setActive(symbol: string): void {
+    this.active = symbol;
+    for (const [sym, ref] of this.rowMap) {
+      const on = sym === symbol;
+      ref.row.classList.toggle('pcw-watchlist-active', on);
+      if (on) ref.row.setAttribute('aria-current', 'true');
+      else ref.row.removeAttribute('aria-current');
+    }
+  }
+
+  /** A row's price, move and sparkline. Kept for symbols not shown yet. */
+  setEntry(symbol: string, patch: Partial<WatchlistEntry>): void {
+    const prev = this.entries.get(symbol) ?? { symbol };
+    this.entries.set(symbol, { ...prev, ...patch, symbol });
+    this.renderRow(symbol);
+  }
+
+  destroy(): void {
+    this.closeMenu();
+    this.el.remove();
+    this.rowMap.clear();
+    this.entries.clear();
+  }
+
+  private shownList(): WatchlistList | undefined {
+    return this.lists.find((l) => l.id === this.activeList);
+  }
+
+  // --- Rows ---
+
+  private renderRows(symbols: string[]): void {
+    for (const sym of [...this.rowMap.keys()]) {
+      if (!symbols.includes(sym)) {
+        this.rowMap.get(sym)!.row.remove();
+        this.rowMap.delete(sym);
+      }
+    }
+    for (const sym of symbols) if (!this.rowMap.has(sym)) this.makeRow(sym);
+    // In list order, under the head when there are rows to head; nodes already in place stay.
+    const rows = symbols.map((sym) => this.rowMap.get(sym)!.row);
+    // With a logo in the list, the rows without one keep its room, so the tickers line up.
+    this.listEl.classList.toggle('pcw-watchlist-logos', rows.some((row) => row.querySelector('.pcw-watchlist-symbol-logo')));
+    this.listEl.replaceChildren(...(this.headEl && rows.length ? [this.headEl] : []), ...rows);
+    if (symbols.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'pcw-watchlist-empty';
+      empty.textContent = this.labels.empty;
+      this.listEl.appendChild(empty);
+    }
+    if (this.active) this.setActive(this.active);
+  }
+
+  /**
+   * A cell's column, set rather than left to the grid's flow: a narrow panel
+   * hides the move, and the cells after it would slide into its track, the
+   * remove button into the change's.
+   */
+  private place(el: HTMLElement, cell: WatchlistCell): void {
+    const cells: WatchlistCell[] = [
+      'symbol', ...(this.options.sparkline ? ['spark', 'price'] as const : ['price', 'move'] as const), 'change',
+      ...(this.callbacks.onRemove ? ['remove'] as const : []),
+    ];
+    // After the leading gutter, the first column.
+    el.style.gridColumnStart = String(cells.indexOf(cell) + 2);
+  }
+
+  /** The names over the columns, when the labels give them: a row of the list's grid, read by eye only. */
+  private makeHead(): HTMLDivElement | null {
+    const names = this.labels.columns;
+    if (!names) return null;
+    const head = document.createElement('div');
+    head.className = 'pcw-watchlist-columns';
+    // Each row reads its figures out itself; the head is for the eye.
+    head.setAttribute('aria-hidden', 'true');
+    const cell = (text: string, name: WatchlistCell) => {
+      const el = document.createElement('span');
+      el.className = `pcw-watchlist-column-${name}`;
+      el.textContent = text;
+      this.place(el, name);
+      head.appendChild(el);
+    };
+    cell(names.symbol, 'symbol');
+    if (this.options.sparkline) cell('', 'spark');
+    cell(names.price, 'price');
+    if (!this.options.sparkline) cell(names.move, 'move');
+    cell(names.change, 'change');
+    if (this.callbacks.onRemove) cell('', 'remove');
+    return head;
+  }
+
+  private makeRow(symbol: string): void {
+    const row = document.createElement('div');
+    row.className = 'pcw-watchlist-row';
+    row.setAttribute('role', 'listitem');
+    row.dataset.symbol = symbol;
+    row.tabIndex = 0;
+    row.draggable = !!this.callbacks.onMove;
+
+    const label = document.createElement('div');
+    label.className = 'pcw-watchlist-symbol';
+    label.textContent = formatSymbol(symbol);
+    // The venue the name leaves out ('HYPERLIQUID:xyz:'), on hover.
+    if (symbol.includes(':')) label.title = symbol;
+    // A logo only where the symbol has one: a row of initials would only repeat the tickers.
+    const logo = rowLogo(this.options.infoOf?.(symbol));
+    if (logo) {
+      label.prepend(logo);
+      label.classList.add('pcw-watchlist-symbol-logo');
+    }
+    this.place(label, 'symbol');
+    row.appendChild(label);
+
+    let sparkCanvas: HTMLCanvasElement | null = null;
+    if (this.options.sparkline) {
+      sparkCanvas = document.createElement('canvas');
+      sparkCanvas.className = 'pcw-watchlist-spark';
+      sparkCanvas.width = 64;
+      sparkCanvas.height = 22;
+      this.place(sparkCanvas, 'spark');
+      row.appendChild(sparkCanvas);
+    }
+
+    // The figures, each a cell of the list's grid, so a column lines up from row to row.
+    const figure = (name: WatchlistCell, text = '') => {
+      const el = document.createElement('span');
+      el.className = `pcw-watchlist-${name}`;
+      el.textContent = text;
+      this.place(el, name);
+      row.appendChild(el);
+      return el;
+    };
+    const priceEl = figure('price', '—');
+    // With a sparkline the move gives its column to the chart: a narrow panel holds four figures, not five.
+    const moveEl = this.options.sparkline ? null : figure('move');
+    const changeEl = figure('change');
+
+    if (this.callbacks.onRemove) {
+      row.classList.add('pcw-watchlist-removable');
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'pcw-watchlist-remove';
+      remove.innerHTML = createIcon('x', 12);
+      remove.tabIndex = -1;
+      const text = fill(this.labels.remove, { symbol });
+      remove.title = text;
+      remove.setAttribute('aria-label', text);
+      remove.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.callbacks.onRemove?.(symbol);
+      });
+      this.place(remove, 'remove');
+      row.appendChild(remove);
+    }
+
+    row.addEventListener('click', () => this.callbacks.onSelect(symbol));
+    row.addEventListener('keydown', (e) => this.onRowKey(e, symbol));
+    row.addEventListener('dragstart', (e) => {
+      this.dragging = symbol;
+      e.dataTransfer?.setData('text/plain', symbol);
+      if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+      row.classList.add('pcw-watchlist-dragging');
+    });
+    row.addEventListener('dragend', () => {
+      this.dragging = null;
+      row.classList.remove('pcw-watchlist-dragging');
+    });
+    row.addEventListener('dragover', (e) => {
+      if (this.dragging && this.dragging !== symbol) e.preventDefault();
+    });
+    row.addEventListener('drop', (e) => {
+      e.preventDefault();
+      const from = this.dragging;
+      this.dragging = null;
+      if (!from || from === symbol) return;
+      const order = this.shownList()?.symbols ?? [];
+      this.callbacks.onMove?.(from, order.indexOf(symbol));
+    });
+
+    this.rowMap.set(symbol, { row, priceEl, moveEl, changeEl, sparkCanvas });
+    this.renderRow(symbol);
+  }
+
+  private onRowKey(e: KeyboardEvent, symbol: string): void {
+    const order = this.shownList()?.symbols ?? [];
+    const index = order.indexOf(symbol);
+    // Keys handled here stay here (Delete would also remove a selected drawing).
+    if (['Enter', ' ', 'Delete', 'Backspace', 'ArrowDown', 'ArrowUp'].includes(e.key)) e.stopPropagation();
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      this.callbacks.onSelect(symbol);
+    } else if ((e.key === 'Delete' || e.key === 'Backspace') && this.callbacks.onRemove) {
+      e.preventDefault();
+      const next = order[index + 1] ?? order[index - 1];
+      this.callbacks.onRemove(symbol);
+      if (next) this.rowMap.get(next)?.row.focus();
+    } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      const to = index + (e.key === 'ArrowDown' ? 1 : -1);
+      if (to < 0 || to >= order.length) return;
+      if (e.altKey) {
+        this.callbacks.onMove?.(symbol, to);
+        this.rowMap.get(symbol)?.row.focus();
+      } else {
+        this.rowMap.get(order[to])?.row.focus();
+      }
+    }
+  }
+
+  private renderRow(symbol: string): void {
+    const ref = this.rowMap.get(symbol);
+    const entry = this.entries.get(symbol);
+    if (!ref || !entry) return;
+
+    // The symbol's own decimals when it has them, as the chart's axis writes it: a stock in dong reads 49,550, not 49,550.00.
+    const own = this.options.infoOf?.(symbol)?.pricePrecision;
+    const decimals = own !== undefined && Number.isInteger(own) && own >= 0 ? Math.min(own, MAX_PRICE_DECIMALS) : undefined;
+    if (entry.lastPrice !== undefined) {
+      ref.priceEl.textContent = formatPrice(entry.lastPrice, this.locale, decimals);
+    }
+
+    if (entry.lastPrice !== undefined && entry.refPrice !== undefined && entry.refPrice !== 0) {
+      const diff = entry.lastPrice - entry.refPrice;
+      const pct = (diff / entry.refPrice) * 100;
+      // No move is neither up nor down: no sign and the text's own colour, where +0.00% in green read as a gain.
+      const sign = diff > 0 ? '+' : diff < 0 ? '-' : '';
+      const tone = diff > 0 ? ' pcw-up' : diff < 0 ? ' pcw-down' : '';
+      const pctText = Math.abs(pct).toLocaleString(this.locale, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      if (ref.moveEl) {
+        ref.moveEl.textContent = `${sign}${formatMove(Math.abs(diff), entry.lastPrice, this.locale, decimals)}`;
+        ref.moveEl.className = `pcw-watchlist-move${tone}`;
+      }
+      ref.changeEl.textContent = `${sign}${pctText}%`;
+      ref.changeEl.className = `pcw-watchlist-change${tone}`;
+    } else {
+      if (ref.moveEl) ref.moveEl.textContent = '';
+      ref.changeEl.textContent = '';
+    }
+
+    if (ref.sparkCanvas && entry.sparkline && entry.sparkline.length >= 2) {
+      drawSparkline(ref.sparkCanvas, entry.sparkline, entry.refPrice ?? entry.sparkline[0]);
+    }
+  }
+
+  // --- The lists menu ---
+
+  private openMenu(): void {
+    this.renderMenu();
+    this.menuEl.hidden = false;
+    this.nameBtn.setAttribute('aria-expanded', 'true');
+    document.addEventListener('mousedown', this.onOutside);
+  }
+
+  private closeMenu(): void {
+    this.menuEl.hidden = true;
+    this.nameBtn.setAttribute('aria-expanded', 'false');
+    document.removeEventListener('mousedown', this.onOutside);
+  }
+
+  private renderMenu(): void {
+    const item = (text: string, onClick: () => void): HTMLButtonElement => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'pcw-dropdown-item';
+      btn.setAttribute('role', 'menuitem');
+      btn.textContent = text;
+      btn.addEventListener('click', onClick);
+      return btn;
+    };
+    const items: HTMLElement[] = this.lists.map((list) => {
+      const btn = item('', () => {
+        this.closeMenu();
+        this.callbacks.onPickList?.(list.id);
+      });
+      btn.dataset.list = list.id;
+      btn.classList.toggle('pcw-active', list.id === this.activeList);
+      const name = document.createElement('span');
+      name.textContent = list.name;
+      const count = document.createElement('span');
+      count.className = 'pcw-watchlist-count';
+      count.textContent = String(list.symbols.length);
+      btn.append(name, count);
+      return btn;
+    });
+    const sep = document.createElement('div');
+    sep.className = 'pcw-dropdown-divider';
+    items.push(sep);
+    if (this.callbacks.onCreateList) {
+      const create = item(this.labels.newList, () => this.editName('', (name) => this.callbacks.onCreateList?.(name)));
+      create.dataset.action = 'new';
+      items.push(create);
+    }
+    const shown = this.shownList();
+    if (shown && this.callbacks.onRenameList) {
+      const rename = item(this.labels.rename, () => this.editName(shown.name, (name) => this.callbacks.onRenameList?.(shown.id, name)));
+      rename.dataset.action = 'rename';
+      items.push(rename);
+    }
+    if (shown && this.callbacks.onDeleteList && this.lists.length > 1) {
+      let armed = false;
+      const del = item(this.labels.deleteList, () => {
+        if (!armed) {
+          armed = true;
+          del.textContent = fill(this.labels.confirmDelete, { name: shown.name });
+          del.classList.add('pcw-danger');
+          return;
+        }
+        this.closeMenu();
+        this.callbacks.onDeleteList?.(shown.id);
+      });
+      del.dataset.action = 'delete';
+      items.push(del);
+    }
+    this.menuEl.replaceChildren(...items);
+  }
+
+  /** A name typed in place of the list's: Enter keeps it, Escape or leaving drops it. */
+  private editName(initial: string, done: (name: string) => void): void {
+    this.closeMenu();
+    const input = document.createElement('input');
+    input.className = 'pcw-watchlist-input';
+    input.type = 'text';
+    input.maxLength = 60;
+    input.value = initial;
+    input.placeholder = this.labels.listName;
+    input.setAttribute('aria-label', this.labels.listName);
+    this.nameBtn.hidden = true;
+    this.headerEl.insertBefore(input, this.nameBtn);
+    let finished = false;
+    const finish = (keep: boolean) => {
+      if (finished) return;
+      finished = true;
+      const name = input.value.trim();
+      input.remove();
+      this.nameBtn.hidden = false;
+      if (keep && name && name !== initial) done(name);
+      this.nameBtn.focus();
+    };
+    input.addEventListener('keydown', (e) => {
+      e.stopPropagation();
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        finish(true);
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        finish(false);
+      }
+    });
+    input.addEventListener('blur', () => finish(false));
+    input.focus();
+  }
+}
+
+function formatSymbol(symbol: string): string {
+  // The ticker without its venue ('HYPERLIQUID:xyz:NVDA' is NVDA), which the row's tooltip keeps.
+  // A symbol that ends in ':' has no ticker to show: it shows whole.
+  const ticker = symbol.slice(symbol.lastIndexOf(':') + 1) || symbol;
+  // A pair already written as one (a DEX pool's "WETH/USDC") stays as it is.
+  if (ticker.includes('/')) return ticker;
+  // Add a /  separator for typical crypto pair suffixes; leaves stock tickers
+  // (AAPL, NVDA) alone.
+  for (const quote of ['USDT', 'USD', 'BTC', 'ETH', 'EUR']) {
+    if (ticker.length > quote.length && ticker.endsWith(quote)) {
+      return ticker.slice(0, -quote.length) + '/' + quote;
+    }
+  }
+  return ticker;
+}
+
+/** A price at `decimals` (the symbol's own), or by its size without them: 2 from 1,000, 4 from 1, four figures under 1. */
+function formatPrice(v: number, locale: string | undefined, decimals?: number): string {
+  if (decimals !== undefined) return v.toLocaleString(locale, { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+  if (v === 0) return '0';
+  const abs = Math.abs(v);
+  if (abs >= 1000) return v.toLocaleString(locale, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  if (abs >= 1) return v.toLocaleString(locale, { minimumFractionDigits: 4, maximumFractionDigits: 4 });
+  // Four significant figures, in as many decimals as they take: a coin priced in billionths keeps them.
+  return v.toLocaleString(locale, { maximumFractionDigits: smallValueDecimals(v) });
+}
+
+/** A move in the price's own decimals: 956.12 beside 73,843.88, 0.0000003 beside 0.0000068. */
+function formatMove(move: number, price: number, locale: string | undefined, own?: number): string {
+  if (own !== undefined) return move.toLocaleString(locale, { minimumFractionDigits: own, maximumFractionDigits: own });
+  const abs = Math.abs(price);
+  if (abs >= 1000) return move.toLocaleString(locale, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  if (abs >= 1) return move.toLocaleString(locale, { minimumFractionDigits: 4, maximumFractionDigits: 4 });
+  // A price under 1 shows four significant figures: the move goes as far down.
+  const decimals = abs > 0 ? smallValueDecimals(abs) : 4;
+  return move.toLocaleString(locale, { maximumFractionDigits: decimals });
+}
+
+function drawSparkline(canvas: HTMLCanvasElement, samples: number[], ref: number): void {
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  const dpr = window.devicePixelRatio || 1;
+  if (canvas.width !== canvas.clientWidth * dpr) {
+    canvas.width = (canvas.clientWidth || 64) * dpr;
+    canvas.height = (canvas.clientHeight || 22) * dpr;
+  }
+  const w = canvas.width;
+  const h = canvas.height;
+
+  let lo = Infinity, hi = -Infinity;
+  for (const v of samples) {
+    if (v < lo) lo = v;
+    if (v > hi) hi = v;
+  }
+  const span = Math.max(hi - lo, 1e-9);
+  const last = samples[samples.length - 1];
+  const up = last >= ref;
+  const color = up ? '#1fa874' : '#e8505b';
+
+  ctx.clearRect(0, 0, w, h);
+  ctx.lineWidth = 1.4 * dpr;
+  ctx.strokeStyle = color;
+  ctx.beginPath();
+  const step = w / (samples.length - 1);
+  for (let i = 0; i < samples.length; i++) {
+    const x = i * step;
+    const y = h - ((samples[i] - lo) / span) * (h - 4) - 2;
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+}
+
+/**
+ * A row's logo: decoration, as the ticker beside it says the same. One that
+ * fails to load (a blocked host, a page's image policy) shows nothing.
+ */
+function rowLogo(info: SymbolInfo | undefined): HTMLImageElement | null {
+  const src = logoSrc(info?.logo);
+  if (!src) return null;
+  const img = document.createElement('img');
+  img.className = 'pcw-watchlist-logo';
+  img.alt = '';
+  img.draggable = false;
+  img.setAttribute('aria-hidden', 'true');
+  img.setAttribute('loading', 'lazy');
+  img.setAttribute('decoding', 'async');
+  // The logo's host learns nothing of the page it is shown on.
+  img.setAttribute('referrerpolicy', 'no-referrer');
+  // Its room stays, empty, so its ticker still lines up with the others.
+  img.addEventListener('error', () => { img.style.visibility = 'hidden'; }, { once: true });
+  img.src = src;
+  return img;
+}

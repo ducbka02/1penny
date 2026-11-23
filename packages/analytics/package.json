@@ -1,0 +1,60 @@
+{
+  "name": "@1penny/analytics",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Bar-by-bar backtesting, portfolio tracking, Monte Carlo simulation, and risk analytics for 1Penny.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ducbka02/1penny.git",
+    "directory": "packages/analytics"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "sideEffects": false,
+  "keywords": [
+    "trading",
+    "backtest",
+    "backtesting",
+    "analytics",
+    "risk-metrics",
+    "portfolio",
+    "sharpe",
+    "sortino",
+    "1penny",
+    "trading-strategy",
+    "monte-carlo",
+    "drawdown",
+    "typescript"
+  ],
+  "homepage": "https://github.com/ducbka02/1penny",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite build --watch",
+    "clean": "rm -rf dist",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "pnpm build"
+  },
+  "dependencies": {
+    "@1penny/commons": "workspace:*"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.8"
+  }
+}

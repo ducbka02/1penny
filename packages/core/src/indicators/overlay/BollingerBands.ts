@@ -1,0 +1,84 @@
+import type { IndicatorDescriptor, DataSeries, IndicatorConfig, IndicatorOutput, IndicatorValue } from '@1penny/commons';
+import { IndicatorBase } from '../IndicatorBase.js';
+import { IndicatorValueMap } from '../IndicatorValueMap.js';
+import { getIntParam, getNumberParam } from '../params.js';
+
+export class BollingerBandsIndicator extends IndicatorBase {
+  descriptor: IndicatorDescriptor = {
+    id: 'bb',
+    name: 'Bollinger Bands',
+    placement: 'overlay' as const,
+    defaultConfig: { period: 20, stdDev: 2, source: 'close' },
+    shortName: 'BB',
+    inputs: { source: { source: true }, period: { kind: 'int', min: 1 }, stdDev: { kind: 'number', min: 0.1, step: 0.1 } },
+    fills: [{ between: ['upper', 'lower'], color: 0, opacity: 0.1 }],
+    plots: [
+      { key: 'upper', title: 'Upper', color: 0 },
+      { key: 'middle', title: 'Basis', color: 1 },
+      { key: 'lower', title: 'Lower', color: 0 },
+    ],
+  };
+
+  calculate(data: DataSeries, config: IndicatorConfig): IndicatorOutput {
+    const period = getIntParam(config, 'period', 20, 1);
+    const stdDevMult = getNumberParam(config, 'stdDev', 2);
+    const values = new IndicatorValueMap();
+    const series: (IndicatorValue | null)[] = new Array(data.length).fill(null);
+
+    // Running sum and sum-of-squares for O(n) calculation
+    let sum = 0;
+    let sumSq = 0;
+
+    for (let i = 0; i < data.length; i++) {
+      const c = data[i].close;
+      sum += c;
+      sumSq += c * c;
+
+      if (i >= period) {
+        const old = data[i - period].close;
+        sum -= old;
+        sumSq -= old * old;
+      }
+
+      if (i >= period - 1) {
+        const sma = sum / period;
+        // variance = E[x²] - (E[x])²
+        const variance = sumSq / period - sma * sma;
+        const stdDev = Math.sqrt(Math.max(0, variance));
+
+        const val: IndicatorValue = {
+          middle: sma,
+          upper: sma + stdDevMult * stdDev,
+          lower: sma - stdDevMult * stdDev,
+        };
+        values.set(data[i].time, val);
+        series[i] = val;
+      }
+    }
+    return { values, series };
+  }
+
+  update(data: DataSeries, config: IndicatorConfig, prev: IndicatorOutput, from: number): IndicatorOutput | null {
+    if (!this.canResume(data, prev, from)) return null;
+    const period = getIntParam(config, 'period', 20, 1);
+    const stdDevMult = getNumberParam(config, 'stdDev', 2);
+    for (let i = from; i < data.length; i++) {
+      if (i < period - 1) { this.writePoint(prev, data, i, null); continue; }
+      let sum = 0;
+      let sumSq = 0;
+      for (let j = i - period + 1; j <= i; j++) {
+        const c = data[j].close;
+        sum += c;
+        sumSq += c * c;
+      }
+      const sma = sum / period;
+      const stdDev = Math.sqrt(Math.max(0, sumSq / period - sma * sma));
+      this.writePoint(prev, data, i, {
+        middle: sma,
+        upper: sma + stdDevMult * stdDev,
+        lower: sma - stdDevMult * stdDev,
+      });
+    }
+    return prev;
+  }
+}

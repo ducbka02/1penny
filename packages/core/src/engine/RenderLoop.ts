@@ -1,0 +1,84 @@
+import { LayerType } from '@1penny/commons';
+
+export type RenderCallback = (dirtyLayers: ReadonlySet<LayerType>) => void;
+
+export class RenderLoop {
+  private animFrameId = 0;
+  private running = false;
+  /** Off screen or in the background: changes are kept, no frame is asked for. */
+  private paused = false;
+  private dirtyLayers = new Set<LayerType>();
+  // Swap set — avoids allocation per frame
+  private swapLayers = new Set<LayerType>();
+  private callback: RenderCallback | null = null;
+
+  setCallback(cb: RenderCallback): void {
+    this.callback = cb;
+  }
+
+  markDirty(layer: LayerType): void {
+    this.dirtyLayers.add(layer);
+    if (this.running && !this.paused && !this.animFrameId) {
+      this.scheduleFrame();
+    }
+  }
+
+  markAllDirty(): void {
+    this.dirtyLayers.add(LayerType.Background);
+    this.dirtyLayers.add(LayerType.Main);
+    this.dirtyLayers.add(LayerType.Overlay);
+    this.dirtyLayers.add(LayerType.UI);
+    this.dirtyLayers.add(LayerType.Hover);
+    if (this.running && !this.paused && !this.animFrameId) {
+      this.scheduleFrame();
+    }
+  }
+
+  start(): void {
+    this.running = true;
+    this.markAllDirty();
+  }
+
+  /** Stop asking for frames (the chart is off screen, or the page hidden); what changes meanwhile is kept. */
+  pause(): void {
+    this.paused = true;
+    if (this.animFrameId) {
+      cancelAnimationFrame(this.animFrameId);
+      this.animFrameId = 0;
+    }
+  }
+
+  /** Ask for frames again: one draws what changed while paused. */
+  resume(): void {
+    if (!this.paused) return;
+    this.paused = false;
+    if (this.running && this.dirtyLayers.size > 0 && !this.animFrameId) this.scheduleFrame();
+  }
+
+  isPaused(): boolean {
+    return this.paused;
+  }
+
+  stop(): void {
+    this.running = false;
+    if (this.animFrameId) {
+      cancelAnimationFrame(this.animFrameId);
+      this.animFrameId = 0;
+    }
+  }
+
+  private scheduleFrame(): void {
+    this.animFrameId = requestAnimationFrame(() => {
+      this.animFrameId = 0;
+      if (!this.running || !this.callback) return;
+      if (this.dirtyLayers.size > 0) {
+        // Swap sets to avoid allocation — pass current dirty set, clear it via swap
+        const toRender = this.dirtyLayers;
+        this.dirtyLayers = this.swapLayers;
+        this.callback(toRender);
+        toRender.clear();
+        this.swapLayers = toRender;
+      }
+    });
+  }
+}

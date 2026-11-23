@@ -1,0 +1,62 @@
+{
+  "name": "@1penny/core",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Canvas 2D and WebGL 2 rendering engine, viewport, 134 indicators, drawing tools, and streaming feeds for @1penny/chart.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ducbka02/1penny.git",
+    "directory": "packages/core"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "sideEffects": false,
+  "keywords": [
+    "trading",
+    "chart",
+    "canvas",
+    "types",
+    "trading-chart",
+    "candlestick-chart",
+    "technical-analysis",
+    "webgl",
+    "1penny"
+  ],
+  "homepage": "https://github.com/ducbka02/1penny",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./patterns": {
+      "types": "./dist/patterns/index.d.ts",
+      "import": "./dist/patterns/index.js",
+      "require": "./dist/patterns/index.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite build --watch",
+    "clean": "rm -rf dist",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "pnpm build"
+  },
+  "dependencies": {
+    "@1penny/commons": "workspace:*"
+  },
+  "devDependencies": {
+    "jsdom": "^25.0.1",
+    "vitest": "^2.1.8"
+  }
+}

@@ -1,0 +1,191 @@
+import { PHI } from '@1penny/commons';
+import { createIcon } from './icons.js';
+import { EN_TRANSLATOR, type Translator } from './i18n.js';
+import { markPart } from './widgetFeatures.js';
+
+export interface ChartNavActions {
+  zoomIn: () => void;
+  zoomOut: () => void;
+  /** Scroll a step toward later (1) or earlier (-1) bars. */
+  scroll: (direction: 1 | -1) => void;
+  /** Back to the whole chart, scaled to fit. */
+  reset: () => void;
+  /** The plot area in the host, where the buttons sit (centred on its bottom). */
+  plotRect: () => { x: number; y: number; width: number; height: number };
+}
+
+/** A held scroll button repeats after this, every REPEAT_MS. */
+const HOLD_MS = 300;
+const REPEAT_MS = 80;
+/** The strip along the plot's bottom where the buttons show: φ⁻³ (24%) of its height, at least this many px. */
+const ZONE_SHARE = PHI ** -3;
+const MIN_ZONE_PX = 80;
+
+/**
+ * Navigation over the chart: zoom out and in, scroll earlier and later
+ * (held, it keeps going), reset. It shows while a mouse or pen is near the
+ * plot's bottom edge, out of the way of the data above, or while one of
+ * its buttons has focus; touch has its own gestures.
+ */
+export class WidgetChartNav {
+  private el: HTMLDivElement;
+  private holdTimer: ReturnType<typeof setTimeout> | null = null;
+  private repeatTimer: ReturnType<typeof setInterval> | null = null;
+  /** A pointer is pressing on the bar: the focus that follows is the pointer's, not the keyboard's. */
+  private pressed = false;
+  /** A button has the keyboard's focus: the bar stays up wherever the pointer is. */
+  private keyboardFocus = false;
+  /** How far above the plot's bottom it stands: over what else sits there (the chart's marks). */
+  private lift = 0;
+  /** Told to step aside (the pointer reads something its place would cover). */
+  private suppressed = false;
+  private readonly onMove = (e: PointerEvent) => {
+    if (e.pointerType === 'touch' || this.suppressed) return;
+    // A held scroll button keeps going wherever the pointer drifts.
+    if (this.holdTimer || this.repeatTimer) return;
+    if (!this.nearBottom(e) && !this.keyboardFocus) {
+      this.el.classList.remove('pcw-nav-shown');
+      this.stopHold();
+      return;
+    }
+    if (!this.el.classList.contains('pcw-nav-shown')) this.place();
+    this.el.classList.add('pcw-nav-shown');
+  };
+  private readonly onLeave = () => {
+    this.el.classList.remove('pcw-nav-shown');
+    this.stopHold();
+  };
+
+  constructor(
+    private readonly host: HTMLElement,
+    private readonly actions: ChartNavActions,
+    t: Translator = EN_TRANSLATOR,
+  ) {
+    this.el = document.createElement('div');
+    this.el.className = 'pcw-nav';
+    markPart(this.el, 'navigation');
+    this.el.setAttribute('role', 'toolbar');
+    this.el.setAttribute('aria-label', t('nav.label'));
+
+    const buttons: [string, string, string, 'navigation.zoom' | 'navigation.scroll' | 'navigation.reset'][] = [
+      ['zoomOut', 'minus', t('nav.zoomOut'), 'navigation.zoom'],
+      ['zoomIn', 'plus', t('nav.zoomIn'), 'navigation.zoom'],
+      ['scrollLeft', 'chevronLeft', t('nav.scrollLeft'), 'navigation.scroll'],
+      ['scrollRight', 'chevronRight', t('nav.scrollRight'), 'navigation.scroll'],
+      ['reset', 'reset', t('nav.reset'), 'navigation.reset'],
+    ];
+    for (const [action, icon, label, feature] of buttons) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'pcw-nav-btn';
+      btn.dataset.nav = action;
+      markPart(btn, feature);
+      btn.title = label;
+      btn.setAttribute('aria-label', label);
+      btn.innerHTML = createIcon(icon, 16);
+      if (action === 'scrollLeft' || action === 'scrollRight') {
+        const direction = action === 'scrollRight' ? 1 : -1;
+        btn.addEventListener('pointerdown', (e) => {
+          if (e.button !== 0) return;
+          e.preventDefault();
+          // A release elsewhere (or a lost window) still ends the hold.
+          try { btn.setPointerCapture(e.pointerId); } catch { /* an unknown pointer */ }
+          this.startHold(direction);
+        });
+        for (const end of ['pointerup', 'pointercancel', 'pointerleave'] as const) btn.addEventListener(end, () => this.stopHold());
+        // A keyboard press scrolls one step.
+        btn.addEventListener('click', (e) => {
+          if (e.detail === 0) actions.scroll(direction);
+        });
+      } else {
+        btn.addEventListener('click', () => {
+          if (action === 'zoomIn') actions.zoomIn();
+          else if (action === 'zoomOut') actions.zoomOut();
+          else actions.reset();
+        });
+      }
+      this.el.appendChild(btn);
+    }
+
+    // A double-click or a right-click on the buttons isn't the chart's (a drawing under them).
+    for (const type of ['dblclick', 'contextmenu', 'pointerdown', 'mousedown'] as const) {
+      this.el.addEventListener(type, (e) => e.stopPropagation());
+    }
+
+    // Shown with the keyboard too, while a button has focus. A click focuses a
+    // button as well; that focus doesn't keep the bar over the chart.
+    this.el.addEventListener('pointerdown', () => { this.pressed = true; }, { capture: true });
+    // Focus comes with the press: by the release it has, or the press was on no button.
+    this.el.addEventListener('pointerup', () => { this.pressed = false; }, { capture: true });
+    this.el.addEventListener('focusin', () => {
+      this.keyboardFocus = !this.pressed;
+      this.pressed = false;
+      this.place();
+      this.el.classList.add('pcw-nav-shown');
+    });
+    this.el.addEventListener('focusout', (e) => {
+      if (this.el.contains(e.relatedTarget as Node | null)) return;
+      this.keyboardFocus = false;
+      this.el.classList.remove('pcw-nav-shown');
+    });
+
+    host.appendChild(this.el);
+    host.addEventListener('pointermove', this.onMove);
+    host.addEventListener('pointerleave', this.onLeave);
+  }
+
+  /** Stand `px` above the plot's bottom, clear of what sits along it; 0 puts it back. */
+  setLift(px: number): void {
+    const lift = Math.max(0, Math.round(px));
+    if (lift === this.lift) return;
+    this.lift = lift;
+    if (this.el.classList.contains('pcw-nav-shown')) this.place();
+  }
+
+  /** Step aside while `on`: hidden wherever the pointer is, a keyboard's focus on it apart. */
+  setSuppressed(on: boolean): void {
+    this.suppressed = on;
+    if (on && !this.keyboardFocus) {
+      this.el.classList.remove('pcw-nav-shown');
+      this.stopHold();
+    }
+  }
+
+  destroy(): void {
+    this.stopHold();
+    this.host.removeEventListener('pointermove', this.onMove);
+    this.host.removeEventListener('pointerleave', this.onLeave);
+    this.el.remove();
+  }
+
+  /** Whether the pointer is over the plot, in the strip along its bottom. */
+  private nearBottom(e: PointerEvent): boolean {
+    const r = this.actions.plotRect();
+    const box = this.host.getBoundingClientRect();
+    const x = e.clientX - box.left;
+    const y = e.clientY - box.top;
+    const zone = Math.max(MIN_ZONE_PX, r.height * ZONE_SHARE);
+    return x >= r.x && x <= r.x + r.width && y <= r.y + r.height && y >= r.y + r.height - zone;
+  }
+
+  private place(): void {
+    const r = this.actions.plotRect();
+    this.el.style.left = `${Math.round(r.x + r.width / 2)}px`;
+    this.el.style.top = `${Math.round(r.y + r.height) - this.lift}px`;
+  }
+
+  private startHold(direction: 1 | -1): void {
+    this.stopHold();
+    this.actions.scroll(direction);
+    this.holdTimer = setTimeout(() => {
+      this.repeatTimer = setInterval(() => this.actions.scroll(direction), REPEAT_MS);
+    }, HOLD_MS);
+  }
+
+  private stopHold(): void {
+    if (this.holdTimer) clearTimeout(this.holdTimer);
+    if (this.repeatTimer) clearInterval(this.repeatTimer);
+    this.holdTimer = null;
+    this.repeatTimer = null;
+  }
+}

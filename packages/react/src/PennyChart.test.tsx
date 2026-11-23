@@ -1,0 +1,272 @@
+import { render, cleanup } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const { chart, ChartCtor } = vi.hoisted(() => {
+  // The bars it holds, as a chart keeps them: the component reads them back.
+  const held: unknown[] = [];
+  const chart = {
+    connect: vi.fn(),
+    setData: vi.fn((bars: unknown[]) => { held.splice(0, held.length, ...bars); }),
+    updateLastBar: vi.fn((bar: unknown) => { held[held.length - 1] = bar; }),
+    appendBar: vi.fn((bar: unknown) => { held.push(bar); }),
+    appendBars: vi.fn((bars: unknown[]) => { held.push(...bars); }),
+    // As the chart's: the loaded bar with that time, or false.
+    updateBar: vi.fn((bar: { time: number }) => {
+      const i = held.findIndex((h) => (h as { time: number }).time === bar.time);
+      if (i < 0) return false;
+      held[i] = bar;
+      return true;
+    }),
+    getData: () => held,
+    isExtendedHoursVisible: () => true,
+    isReplayActive: () => false,
+    setChartType: vi.fn(),
+    setTheme: vi.fn(),
+    addIndicator: vi.fn((id: string) => `iid-${id}`),
+    removeIndicator: vi.fn(),
+    setSignalMarkers: vi.fn(),
+    setSignalMarkerStyle: vi.fn(),
+    setTradeZones: vi.fn(),
+    setTradeZoneStyle: vi.fn(),
+    setWatermark: vi.fn(),
+    setOverrides: vi.fn(),
+    setFeatures: vi.fn(),
+    on: vi.fn(),
+    off: vi.fn(),
+    disconnectStream: vi.fn(),
+    destroy: vi.fn(),
+    screenshot: vi.fn(),
+    screenshotDataURL: vi.fn(() => 'data:'),
+  };
+  return { chart, ChartCtor: vi.fn(() => chart) };
+});
+
+vi.mock('@1penny/chart', async (importOriginal) => ({
+  syncIndicators: (await importOriginal<typeof import('@1penny/chart')>()).syncIndicators,
+  feedBars: (await importOriginal<typeof import('@1penny/chart')>()).feedBars,
+  CORRECTABLE_BARS: (await importOriginal<typeof import('@1penny/chart')>()).CORRECTABLE_BARS,
+  Chart: ChartCtor,
+  BinanceAdapter: vi.fn(),
+  DARK_THEME: { name: 'dark' },
+  LIGHT_THEME: { name: 'light' },
+}));
+
+import { PennyChart } from './PennyChart.js';
+
+beforeEach(() => vi.clearAllMocks());
+afterEach(() => cleanup());
+
+const BAR = { time: 1, open: 1, high: 1, low: 1, close: 1, volume: 1 };
+const FEED = { name: 'pulled', getBars: async () => [], subscribeBars: () => () => {} };
+
+describe('<PennyChart> (react)', () => {
+  it('passes options through to the Chart, under its own props', () => {
+    render(
+      <PennyChart
+        chartType="line"
+        features={{ trading: false }}
+        options={{ maxBarSpacing: 160, rightMargin: 1, chartType: 'bar', features: { alerts: false, trading: true } }}
+      />,
+    );
+    const opts = (ChartCtor.mock.calls[0] as unknown[])[1] as Record<string, unknown>;
+    expect(opts).toMatchObject({ maxBarSpacing: 160, rightMargin: 1, chartType: 'line' });
+    expect(opts.features).toMatchObject({ alerts: false, trading: false, drawings: true });
+  });
+
+  it('keeps a watermark from options when there is no watermarkText', () => {
+    render(<PennyChart options={{ watermark: { text: 'VN30F1M' } }} />);
+    const opts = (ChartCtor.mock.calls[0] as unknown[])[1] as Record<string, unknown>;
+    expect(opts.watermark).toEqual({ text: 'VN30F1M' });
+  });
+
+  it('keeps its own defaults without options', () => {
+    render(<PennyChart />);
+    const opts = (ChartCtor.mock.calls[0] as unknown[])[1] as Record<string, unknown>;
+    expect(opts).toMatchObject({ crosshair: { mode: 'magnet' } });
+    // The room past the newest bar is the chart's own, by its density.
+    expect(opts.rightMargin).toBeUndefined();
+  });
+
+  it('constructs a Chart and connects with the symbol/timeframe', () => {
+    render(<PennyChart symbol="ETHUSDT" timeframe="1m" />);
+    expect(ChartCtor).toHaveBeenCalledTimes(1);
+    expect(chart.connect).toHaveBeenCalledWith(
+      expect.objectContaining({ symbol: 'ETHUSDT', timeframe: '1m' }),
+    );
+  });
+
+  it('connects to a feed instead of an adapter when given one', () => {
+    render(<PennyChart feed={FEED} symbol="AAA" timeframe="1h" />);
+    expect(chart.connect).toHaveBeenCalledWith(expect.objectContaining({ feed: FEED, symbol: 'AAA', timeframe: '1h' }));
+    expect((chart.connect.mock.calls[0] as unknown[])[0]).not.toHaveProperty('adapter');
+  });
+
+  it('uses setData for static data and does not connect', () => {
+    render(<PennyChart data={[BAR]} />);
+    expect(chart.setData).toHaveBeenCalled();
+    expect(chart.connect).not.toHaveBeenCalled();
+  });
+
+  it('gives the chart its bars once at mount', () => {
+    render(<PennyChart data={[BAR]} />);
+    expect(chart.setData).toHaveBeenCalledTimes(1);
+  });
+
+  it('feeds a new array that adds a bar or changes the last one as ticks, so the view stays', () => {
+    const a = { ...BAR };
+    const b = { ...BAR, time: 2 };
+    const c = { ...BAR, time: 3 };
+    const { rerender } = render(<PennyChart data={[a]} />);
+    rerender(<PennyChart data={[a, b]} />);
+    expect(chart.appendBar).toHaveBeenLastCalledWith(b);
+    expect(chart.updateLastBar).not.toHaveBeenCalled();
+    rerender(<PennyChart data={[a, { ...b, close: 3 }]} />);
+    expect(chart.updateLastBar).toHaveBeenLastCalledWith({ ...b, close: 3 });
+    // The forming bar's last tick, then the next bar.
+    rerender(<PennyChart data={[a, { ...b, close: 4 }, c]} />);
+    expect(chart.updateLastBar).toHaveBeenLastCalledWith({ ...b, close: 4 });
+    expect(chart.appendBar).toHaveBeenLastCalledWith(c);
+    // The same bars again, in a new array: nothing to do.
+    rerender(<PennyChart data={[{ ...a }, { ...b, close: 4 }, { ...c }]} />);
+    expect(chart.updateLastBar).toHaveBeenCalledTimes(2);
+    expect(chart.appendBar).toHaveBeenCalledTimes(2);
+    expect(chart.setData).toHaveBeenCalledTimes(1);
+  });
+
+  it('feeds bars added together, as a batched render gives them, in one go', () => {
+    const a = { ...BAR };
+    const { rerender } = render(<PennyChart data={[a]} />);
+    rerender(<PennyChart data={[a, { ...BAR, time: 2 }, { ...BAR, time: 3 }]} />);
+    expect(chart.appendBars).toHaveBeenCalledWith([{ ...BAR, time: 2 }, { ...BAR, time: 3 }]);
+    expect(chart.setData).toHaveBeenCalledTimes(1);
+  });
+
+  it('gives its bars again when something else gave the chart bars since', () => {
+    const a = { ...BAR };
+    const b = { ...BAR, time: 2 };
+    const { rerender } = render(<PennyChart data={[a, b]} />);
+    chart.appendBar({ ...BAR, time: 3, close: 9 }); // a stream's bar, or one through the ref
+    chart.appendBar.mockClear();
+    rerender(<PennyChart data={[a, { ...b, close: 5 }]} />);
+    expect(chart.setData).toHaveBeenLastCalledWith([a, { ...b, close: 5 }]);
+    expect(chart.updateLastBar).not.toHaveBeenCalled();
+  });
+
+  it('feeds a new array with a bar before the forming one changed as updateBar: the view stays', () => {
+    const bars = [1, 2, 3, 4, 5].map((time) => ({ ...BAR, time }));
+    const { rerender } = render(<PennyChart data={bars} />);
+    rerender(<PennyChart data={[...bars.slice(0, 3), { ...bars[3], close: 3, high: 3 }, bars[4]]} />);
+    expect(chart.updateBar).toHaveBeenCalledWith({ ...BAR, time: 4, close: 3, high: 3 });
+    expect(chart.setData).toHaveBeenCalledTimes(1);
+  });
+
+  it('takes any other new array as a new series', () => {
+    const bars = [1, 2, 3].map((time) => ({ ...BAR, time }));
+    const series = [
+      [{ ...bars[0], close: 9 }, bars[1], bars[2]], // a bar before the last changed
+      [bars[0], bars[1], { ...bars[2], time: 4 }], // the last bar, another time
+      [bars[0], bars[1]], // a bar taken away
+      [...bars, { ...BAR, time: 2 }], // a bar added before the last
+    ];
+    for (const data of series) {
+      const { rerender, unmount } = render(<PennyChart data={bars} />);
+      vi.clearAllMocks();
+      rerender(<PennyChart data={data} />);
+      expect(chart.setData).toHaveBeenCalledWith(data);
+      expect(chart.appendBar).not.toHaveBeenCalled();
+      expect(chart.updateLastBar).not.toHaveBeenCalled();
+      unmount();
+    }
+  });
+
+  it('starts a new series after the data was taken away', () => {
+    const { rerender } = render(<PennyChart data={[BAR]} />);
+    rerender(<PennyChart />);
+    rerender(<PennyChart data={[BAR, { ...BAR, time: 2 }]} />);
+    expect(chart.setData).toHaveBeenCalledTimes(2);
+    expect(chart.appendBar).not.toHaveBeenCalled();
+  });
+
+  it('gives the chart copies of the bars, so frozen state stays as it is', () => {
+    const a = Object.freeze({ ...BAR });
+    const b = Object.freeze({ ...BAR, time: 2 });
+    const { rerender } = render(<PennyChart data={Object.freeze([a]) as typeof BAR[]} />);
+    rerender(<PennyChart data={Object.freeze([a, b]) as typeof BAR[]} />);
+    expect(chart.appendBar.mock.calls[0][0]).toEqual(b);
+    expect(chart.appendBar.mock.calls[0][0]).not.toBe(b);
+  });
+
+  it('adds the requested indicators on mount', () => {
+    render(<PennyChart indicators={['rsi', 'macd']} />);
+    expect(chart.addIndicator).toHaveBeenCalledWith('rsi');
+    expect(chart.addIndicator).toHaveBeenCalledWith('macd');
+  });
+
+  it("leaves the chart's overrides alone without the prop", () => {
+    render(<PennyChart />);
+    expect(chart.setOverrides).not.toHaveBeenCalled();
+  });
+
+  it('puts the overrides prop on the chart, and changes them with it', () => {
+    const { rerender } = render(<PennyChart overrides={{ 'grid.vertical.visible': false }} />);
+    expect(chart.setOverrides).toHaveBeenLastCalledWith({ 'grid.vertical.visible': false });
+    rerender(<PennyChart />);
+    expect(chart.setOverrides).toHaveBeenLastCalledWith({});
+  });
+
+  it('reacts to a chartType prop change', () => {
+    const { rerender } = render(<PennyChart chartType="candlestick" />);
+    rerender(<PennyChart chartType="line" />);
+    expect(chart.setChartType).toHaveBeenCalledWith('line');
+  });
+
+  it('adds indicators with their inputs, and puts one back when its inputs change', () => {
+    const { rerender } = render(<PennyChart indicators={[{ id: 'ema', params: { period: 50 } }]} />);
+    expect(chart.addIndicator).toHaveBeenCalledWith('ema', { period: 50 });
+    rerender(<PennyChart indicators={[{ id: 'ema', params: { period: 100 } }]} />);
+    expect(chart.removeIndicator).toHaveBeenCalledWith('iid-ema');
+    expect(chart.addIndicator).toHaveBeenLastCalledWith('ema', { period: 100 });
+  });
+
+  it('opens no stream of its own with stream={false}', () => {
+    render(<PennyChart stream={false} />);
+    expect(chart.connect).not.toHaveBeenCalled();
+  });
+
+  it('keeps its stream when data comes later, and closes it when switched off', () => {
+    const { rerender } = render(<PennyChart />);
+    expect(chart.connect).toHaveBeenCalledTimes(1);
+    rerender(<PennyChart data={[BAR]} />);
+    expect(chart.setData).toHaveBeenCalledWith([BAR]);
+    expect(chart.disconnectStream).not.toHaveBeenCalled();
+    rerender(<PennyChart data={[BAR]} stream={false} />);
+    expect(chart.disconnectStream).toHaveBeenCalledTimes(1);
+  });
+
+  it('applies features changed after mount', () => {
+    const { rerender } = render(<PennyChart features={{ replay: true }} />);
+    expect(chart.setFeatures).not.toHaveBeenCalled();
+    rerender(<PennyChart features={{ replay: false }} />);
+    expect(chart.setFeatures).toHaveBeenCalledWith({ replay: false });
+  });
+
+  it('destroys the chart on unmount', () => {
+    const { unmount } = render(<PennyChart />);
+    unmount();
+    expect(chart.destroy).toHaveBeenCalled();
+  });
+
+  it('swaps its crosshair listener when the handler changes, instead of adding one each render', () => {
+    const first = vi.fn();
+    const second = vi.fn();
+    const { rerender, unmount } = render(<PennyChart onCrosshairMove={first} />);
+    rerender(<PennyChart onCrosshairMove={second} />);
+    const onCalls = chart.on.mock.calls.filter(([e]) => e === 'crosshairMove').map(([, h]) => h);
+    const offCalls = chart.off.mock.calls.filter(([e]) => e === 'crosshairMove').map(([, h]) => h);
+    expect(onCalls).toEqual([first, second]);
+    expect(offCalls).toEqual([first]);
+    unmount();
+    expect(chart.off.mock.calls.filter(([e]) => e === 'crosshairMove').map(([, h]) => h)).toEqual([first, second]);
+  });
+});
+

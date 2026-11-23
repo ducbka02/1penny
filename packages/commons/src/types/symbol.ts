@@ -1,0 +1,71 @@
+/** A regular trading window, wall-clock times in the symbol's `timeZone`. */
+export interface SymbolSession {
+  /** Opening time, `'09:30'`. */
+  start: string;
+  /** Closing time, `'16:00'`; earlier than `start` wraps past midnight. */
+  end: string;
+  /**
+   * Weekdays it opens on, 0 Sunday … 6 Saturday (a session past midnight
+   * belongs to the day it starts); every day when left out. The market
+   * status reads them.
+   */
+  days?: number[];
+}
+
+/** What a feed knows about a symbol: names, price steps and trading hours. */
+export interface SymbolInfo {
+  /** The ticker the adapter uses, e.g. `'BTCUSDT'`. */
+  symbol: string;
+  /** A readable name: `'BTC / USDT'`, `'Apple Inc.'`. */
+  description?: string;
+  /** Where it trades: `'Binance'`, `'NASDAQ'`. */
+  exchange?: string;
+  /** `'crypto'`, `'stock'`, `'forex'`, `'futures'`, `'index'`… */
+  type?: string;
+  /** Decimals prices show with. */
+  pricePrecision?: number;
+  /** Smallest price step. */
+  minTick?: number;
+  /**
+   * IANA zone the exchange keeps its hours in, e.g. `'America/New_York'`.
+   * Days, weeks and months a chart builds from shorter bars start at its
+   * midnight, and daily bars are dated by it.
+   */
+  timeZone?: string;
+  /** Regular trading hours in `timeZone`; none means around the clock. */
+  sessions?: SymbolSession[];
+  /** Currency prices are quoted in. */
+  currency?: string;
+  /**
+   * Minutes its prices run behind the market, for a delayed feed (15 for
+   * most exchanges' free data). The widget's status bar then says "Delayed
+   * 15 min" where it says "Live". None or 0: real time.
+   */
+  delayMinutes?: number;
+  /**
+   * The symbol's logo, a square image the widget's symbol search shows at
+   * the start of its row: an `https:` or `http:` address, a path on your
+   * site, a `blob:` URL, or a `data:image/png|jpeg|gif|webp|avif|svg+xml`
+   * one. It is only ever an image's source, loaded with no referrer; any
+   * other address is ignored, and the row shows the ticker's first letter.
+   */
+  logo?: string;
+  /**
+   * Its last price, which the widget's symbol search shows beside it: a
+   * number, written in `pricePrecision` decimals (else by its size), or
+   * text, written as it is. The widget fetches none; give it what your app
+   * has, with the symbols or in a search's results. A search's figures are
+   * shown while its results are, and not kept for the next opening.
+   */
+  last?: number | string;
+  /** Its change over the day, in percent (1.5 is +1.50%), shown beside `last` in the up or down colour. */
+  changePercent?: number;
+}
+
+/** Options for `DataAdapter.searchSymbols`. */
+export interface SymbolSearchOptions {
+  /** Most results to return (default 50). */
+  limit?: number;
+  /** Aborted when a newer query supersedes this one. */
+  signal?: AbortSignal;
+}

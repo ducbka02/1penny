@@ -1,0 +1,35 @@
+import type { ViewportState, Theme } from '@1penny/commons';
+import type { TradingManager } from './TradingManager.js';
+import type { TagRect } from './tradingTags.js';
+
+export class TradingRenderer {
+  constructor(private manager: TradingManager) {}
+
+  render(ctx: CanvasRenderingContext2D, viewport: ViewportState, theme: Theme): void {
+    this.manager.render(ctx, viewport, theme);
+  }
+
+  /**
+   * Draw position/order price badges on the price axis. Call this from the
+   * scene pass AFTER priceAxis.render() so the badges paint on top of the
+   * regular tick labels — matching MT4/MT5 behaviour.
+   */
+  renderAxisBadges(ctx: CanvasRenderingContext2D, viewport: ViewportState, theme: Theme, at?: readonly number[]): void {
+    this.manager.renderAxisBadges(ctx, viewport, theme, at);
+  }
+
+  /** The lines the axis badges are for, top to bottom: where `renderAxisBadges` takes its `at` for. */
+  axisBadgeLines(viewport: ViewportState, theme?: Theme): number[] {
+    return this.manager.axisBadgeLines(viewport, theme);
+  }
+
+  /** Where the tags on the lines were drawn last. */
+  tagRects(): readonly TagRect[] {
+    return this.manager.tagRects();
+  }
+
+  /** Where the axis badges sit, for the scale and other tags to keep clear of. */
+  axisTagYs(viewport: ViewportState, theme?: Theme): number[] {
+    return this.manager.axisTagYs(viewport, theme);
+  }
+}

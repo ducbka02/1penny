@@ -1,0 +1,41 @@
+import type { IndicatorDescriptor, DataSeries, IndicatorConfig, IndicatorOutput, IndicatorValue } from '@1penny/commons';
+import { IndicatorBase } from '../IndicatorBase.js';
+import { IndicatorValueMap } from '../IndicatorValueMap.js';
+
+/**
+ * Price Volume Trend (PVT) — a cumulative volume line like OBV, but each bar's
+ * volume is scaled by its percent price change, so big moves carry more weight.
+ * Rising PVT confirms an uptrend; divergence from price warns of weakening.
+ *
+ * PVT[i] = PVT[i−1] + volume[i] · (close[i] − close[i−1]) / close[i−1].
+ */
+export class PriceVolumeTrendIndicator extends IndicatorBase {
+  descriptor: IndicatorDescriptor = {
+    id: 'pvt',
+    name: 'Price Volume Trend',
+    placement: 'panel' as const,
+    defaultConfig: {},
+    shortName: 'PVT',
+    plots: [{ key: 'value', title: 'PVT', color: 0 }],
+  };
+
+  calculate(data: DataSeries, _config: IndicatorConfig): IndicatorOutput {
+    const values = new IndicatorValueMap();
+    const series: (IndicatorValue | null)[] = new Array(data.length).fill(null);
+    const n = data.length;
+    if (n === 0) return { values, series };
+
+    let pvt = 0;
+    // First bar seeds at 0.
+    values.set(data[0].time, { value: 0 });
+    series[0] = { value: 0 };
+    for (let i = 1; i < n; i++) {
+      const prevClose = data[i - 1].close;
+      if (prevClose !== 0) pvt += (data[i].volume * (data[i].close - prevClose)) / prevClose;
+      const val: IndicatorValue = { value: pvt };
+      values.set(data[i].time, val);
+      series[i] = val;
+    }
+    return { values, series };
+  }
+}

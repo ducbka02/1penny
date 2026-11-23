@@ -1,0 +1,52 @@
+import type { IndicatorDescriptor, DataSeries, IndicatorConfig, IndicatorOutput, IndicatorValue } from '@1penny/commons';
+import { IndicatorBase } from '../IndicatorBase.js';
+import { IndicatorValueMap } from '../IndicatorValueMap.js';
+import { getIntParam } from '../params.js';
+
+/**
+ * Chaikin Volatility — the percent rate of change of an EMA of the high-low
+ * range. Rising = the trading range is expanding (often near tops/breakouts);
+ * falling = contracting (often near bottoms/consolidation). Zero-centered.
+ *
+ * CV = (EMA(range, n) − EMA(range, n)[i − roc]) / EMA(range, n)[i − roc] · 100
+ */
+export class ChaikinVolatilityIndicator extends IndicatorBase {
+  descriptor: IndicatorDescriptor = {
+    id: 'chaikinvol',
+    name: 'Chaikin Volatility',
+    placement: 'panel' as const,
+    defaultConfig: { ema: 10, roc: 10 },
+    inputs: { ema: { kind: 'int', min: 1 }, roc: { kind: 'int', min: 1 } },
+    shortName: 'CV',
+    plots: [{ key: 'value', title: 'CV', color: 0 }],
+    levels: [0],
+  };
+
+  calculate(data: DataSeries, config: IndicatorConfig): IndicatorOutput {
+    const emaP = getIntParam(config, 'ema', 10, 1);
+    const rocP = getIntParam(config, 'roc', 10, 1);
+    const values = new IndicatorValueMap();
+    const series: (IndicatorValue | null)[] = new Array(data.length).fill(null);
+    const n = data.length;
+    if (n <= rocP) return { values, series };
+
+    const k = 2 / (emaP + 1);
+    const ema = new Array(n);
+    let prev = data[0].high - data[0].low;
+    ema[0] = prev;
+    for (let i = 1; i < n; i++) {
+      const range = data[i].high - data[i].low;
+      prev = range * k + prev * (1 - k);
+      ema[i] = prev;
+    }
+
+    for (let i = emaP + rocP; i < n; i++) {
+      const base = ema[i - rocP];
+      const cv = base !== 0 ? ((ema[i] - base) / base) * 100 : 0;
+      const val: IndicatorValue = { value: cv };
+      values.set(data[i].time, val);
+      series[i] = val;
+    }
+    return { values, series };
+  }
+}

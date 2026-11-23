@@ -1,0 +1,273 @@
+// @vitest-environment jsdom
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { WidgetDock, DOCK_WIDTH, DOCK_WIDTH_STEP, type DockPage } from '../WidgetDock.js';
+
+let host: HTMLDivElement;
+let dock: WidgetDock;
+let saved: number[];
+let changes: (string | null)[];
+
+const labels = { rail: 'Panels', resize: 'Resize the panel' };
+const rail = () => host.querySelector<HTMLElement>('.pcw-dock-rail')!;
+const panel = () => host.querySelector<HTMLElement>('.pcw-dock-panel')!;
+const button = (id: string) => host.querySelector<HTMLButtonElement>(`.pcw-dock-rail [data-page="${id}"]`)!;
+const handle = () => host.querySelector<HTMLElement>('.pcw-dock-resize')!;
+const width = () => parseFloat(host.querySelector<HTMLElement>('.pcw-dock')!.style.getPropertyValue('--1p-dock-w'));
+const pointer = (target: EventTarget, type: string, clientX: number) =>
+  target.dispatchEvent(new MouseEvent(type, { clientX, bubbles: true, cancelable: true, button: 0 }));
+
+function page(id: string, events: string[] = []): DockPage & { element: HTMLDivElement } {
+  const element = document.createElement('div');
+  element.className = `page-${id}`;
+  return {
+    id,
+    label: id.toUpperCase(),
+    icon: 'bell',
+    element,
+    onShow: () => events.push(`show:${id}`),
+    onHide: () => events.push(`hide:${id}`),
+  };
+}
+
+function make(options: Partial<ConstructorParameters<typeof WidgetDock>[1]> = {}): void {
+  dock = new WidgetDock(host, {
+    labels,
+    saveWidth: (w) => saved.push(w),
+    onChange: (p) => changes.push(p),
+    ...options,
+  });
+}
+
+beforeEach(() => {
+  host = document.createElement('div');
+  document.body.appendChild(host);
+  saved = [];
+  changes = [];
+});
+
+afterEach(() => {
+  dock.destroy();
+  document.body.innerHTML = '';
+});
+
+describe('WidgetDock', () => {
+  it('has a rail with a button for each page, and a panel shut to start with', () => {
+    make();
+    dock.addPage(page('watchlist'));
+    dock.addPage(page('alerts'));
+    expect(rail().getAttribute('role')).toBe('toolbar');
+    expect(rail().getAttribute('aria-orientation')).toBe('vertical');
+    expect(rail().getAttribute('aria-label')).toBe('Panels');
+    expect([...rail().querySelectorAll<HTMLElement>('[data-page]')].map((b) => b.dataset.page)).toEqual(['watchlist', 'alerts']);
+    expect(button('alerts').getAttribute('aria-label')).toBe('ALERTS');
+    expect(button('alerts').getAttribute('aria-pressed')).toBe('false');
+    expect(button('alerts').querySelector('svg')).not.toBeNull();
+    expect(panel().hidden).toBe(true);
+    expect(dock.current()).toBeNull();
+  });
+
+  it('opens a page in the panel, the others hidden, and says so', () => {
+    make();
+    const events: string[] = [];
+    const a = page('watchlist', events);
+    const b = page('alerts', events);
+    dock.addPage(a);
+    dock.addPage(b);
+    dock.open('alerts');
+    expect(panel().hidden).toBe(false);
+    expect(panel().contains(b.element)).toBe(true);
+    expect([a.element.hidden, b.element.hidden]).toEqual([true, false]);
+    expect(button('alerts').getAttribute('aria-pressed')).toBe('true');
+    expect(dock.current()).toBe('alerts');
+    expect(dock.isOpen('alerts')).toBe(true);
+    expect(events).toEqual(['show:alerts']);
+    expect(changes).toEqual(['alerts']);
+    dock.open('watchlist');
+    expect(events).toEqual(['show:alerts', 'hide:alerts', 'show:watchlist']);
+    expect(button('alerts').getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('a rail button opens its page, and closes the dock when its page is the one open', () => {
+    make();
+    const events: string[] = [];
+    dock.addPage(page('alerts', events));
+    button('alerts').click();
+    expect(dock.current()).toBe('alerts');
+    button('alerts').click();
+    expect(dock.current()).toBeNull();
+    expect(panel().hidden).toBe(true);
+    expect(events).toEqual(['show:alerts', 'hide:alerts']);
+    expect(changes).toEqual(['alerts', null]);
+  });
+
+  it('closes a page only while it is the one open, the keyboard going back to its button', () => {
+    make();
+    dock.addPage(page('watchlist'));
+    const alerts = page('alerts');
+    const input = alerts.element.appendChild(document.createElement('input'));
+    dock.addPage(alerts);
+    dock.open('watchlist');
+    dock.closePage('alerts');
+    expect(dock.current()).toBe('watchlist');
+    dock.open('alerts');
+    input.focus();
+    dock.closePage('alerts');
+    expect(dock.current()).toBeNull();
+    expect(document.activeElement).toBe(button('alerts'));
+  });
+
+  it('moves along the rail with the arrow keys, one button taking Tab', () => {
+    make();
+    dock.addPage(page('watchlist'));
+    dock.addPage(page('alerts'));
+    dock.addPage(page('objects'));
+    expect([...rail().querySelectorAll<HTMLElement>('[data-page]')].map((b) => b.tabIndex)).toEqual([0, -1, -1]);
+    button('watchlist').focus();
+    button('watchlist').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    expect(document.activeElement).toBe(button('alerts'));
+    button('alerts').dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true }));
+    expect(document.activeElement).toBe(button('objects'));
+    button('objects').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    expect(document.activeElement).toBe(button('watchlist'));
+    expect(button('watchlist').tabIndex).toBe(0);
+  });
+
+  it('keeps a Tab stop and the arrow keys on the buttons that show', () => {
+    make();
+    dock.addPage(page('watchlist'));
+    dock.addPage(page('alerts'));
+    dock.addPage(page('objects'));
+    button('watchlist').style.display = 'none';
+    dock.syncRail();
+    expect([button('watchlist'), button('alerts'), button('objects')].map((b) => b.tabIndex)).toEqual([-1, 0, -1]);
+    button('alerts').focus();
+    button('alerts').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    button('objects').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    expect(document.activeElement).toBe(button('alerts'));
+  });
+
+  it('gives the keyboard to its owner’s choice when the page’s button is out of sight', () => {
+    const fallback = document.body.appendChild(document.createElement('button'));
+    let railShown = true;
+    make({ railShown: () => railShown, focusAfterClose: (id) => (id === 'alerts' ? fallback : null) });
+    const alerts = page('alerts');
+    const input = alerts.element.appendChild(document.createElement('input'));
+    dock.addPage(alerts);
+    railShown = false;
+    dock.open('alerts');
+    input.focus();
+    dock.close();
+    expect(document.activeElement).toBe(fallback);
+  });
+
+  it('grows with the look on a wide screen: the width, its limits, and the same width kept', () => {
+    make({ room: () => 3000 });
+    dock.setScale(1.25);
+    expect(width()).toBe(Math.round(262 * 1.25));
+    const h = handle();
+    expect([h.getAttribute('aria-valuemin'), h.getAttribute('aria-valuemax')]).toEqual([String(Math.round(233 * 1.25)), String(Math.round(377 * 1.25))]);
+    // A drag there is kept as the width it is at a scale of 1, so a smaller window shows it in step.
+    pointer(h, 'pointerdown', 500);
+    pointer(document, 'pointermove', 450);
+    pointer(document, 'pointerup', 450);
+    expect(width()).toBe(Math.round(262 * 1.25) + 50);
+    expect(saved.at(-1)).toBeCloseTo((Math.round(262 * 1.25) + 50) / 1.25, 5);
+    dock.setScale(1);
+    expect(width()).toBe(Math.round((Math.round(262 * 1.25) + 50) / 1.25));
+  });
+
+  it('leaves the chart 61.8% of the room, whatever width was asked for', () => {
+    let room = 700;
+    make({ room: () => room, savedWidth: () => 377 });
+    expect(width()).toBe(Math.floor(700 * 0.382));
+    expect(handle().getAttribute('aria-valuemax')).toBe(String(Math.floor(700 * 0.382)));
+    room = 1600;
+    dock.fit();
+    expect(width()).toBe(377);
+  });
+
+  it('shuts on Escape while it is a sheet over the chart', () => {
+    make();
+    const alerts = page('alerts');
+    const input = alerts.element.appendChild(document.createElement('input'));
+    dock.addPage(alerts);
+    dock.open('alerts');
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    expect(dock.current()).toBe('alerts');
+    host.setAttribute('data-pcw-narrow', '');
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    expect(dock.current()).toBeNull();
+  });
+
+  it('opens 262 wide, or as wide as kept last within 233 to 377', () => {
+    make();
+    expect(DOCK_WIDTH).toEqual({ min: 233, default: 262, max: 377 });
+    expect(width()).toBe(262);
+    dock.destroy();
+    host.replaceChildren();
+    make({ savedWidth: () => 999 });
+    expect(width()).toBe(377);
+  });
+
+  it('is made wider by dragging its edge towards the chart, kept when let go', () => {
+    make();
+    dock.addPage(page('alerts'));
+    dock.open('alerts');
+    pointer(handle(), 'pointerdown', 500);
+    pointer(document, 'pointermove', 460);
+    expect(width()).toBe(302);
+    pointer(document, 'pointermove', 100);
+    expect(width()).toBe(377);
+    pointer(document, 'pointerup', 100);
+    expect(saved).toEqual([377]);
+    pointer(document, 'pointermove', 900);
+    expect(width()).toBe(377);
+  });
+
+  it('takes the drag the other way in a right-to-left widget, where it sits on the left', () => {
+    host.dir = 'rtl';
+    make();
+    pointer(handle(), 'pointerdown', 500);
+    pointer(document, 'pointermove', 520);
+    expect(width()).toBe(282);
+    pointer(document, 'pointerup', 520);
+  });
+
+  it('resizes from the keyboard on its edge, which says how wide it is', () => {
+    make();
+    const h = handle();
+    expect(h.getAttribute('role')).toBe('separator');
+    expect(h.getAttribute('aria-label')).toBe('Resize the panel');
+    expect(h.tabIndex).toBe(0);
+    expect([h.getAttribute('aria-valuemin'), h.getAttribute('aria-valuemax'), h.getAttribute('aria-valuenow')]).toEqual(['233', '377', '262']);
+    h.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
+    expect(width()).toBe(262 + DOCK_WIDTH_STEP);
+    expect(h.getAttribute('aria-valuenow')).toBe(String(262 + DOCK_WIDTH_STEP));
+    h.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true }));
+    expect(width()).toBe(233);
+    h.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true }));
+    expect(width()).toBe(377);
+    expect(saved).toEqual([262 + DOCK_WIDTH_STEP, 233, 377]);
+  });
+
+  it('marks its rail and each button with their switches', () => {
+    make();
+    dock.addPage({ ...page('alerts'), parts: ['dock.alerts', 'alerts'] });
+    expect(rail().dataset.pcwPart).toBe('dock');
+    expect(button('alerts').dataset.pcwPart).toBe('dock.alerts alerts');
+  });
+
+  it('goes away with the widget, a drag in hand with it', () => {
+    make();
+    dock.addPage(page('alerts'));
+    const element = host.querySelector<HTMLElement>('.pcw-dock')!;
+    pointer(handle(), 'pointerdown', 500);
+    dock.destroy();
+    pointer(document, 'pointermove', 400);
+    pointer(document, 'pointerup', 400);
+    expect(host.querySelector('.pcw-dock')).toBeNull();
+    expect(element.style.getPropertyValue('--1p-dock-w')).toBe('262px');
+    expect(saved).toEqual([]);
+    dock = new WidgetDock(host, { labels });
+  });
+});

@@ -1,0 +1,124 @@
+import type { DrawingState, Point, ViewportState } from '@1penny/commons';
+import { DrawingBase, lineSpace } from '../DrawingBase.js';
+import { extendOptions } from './options.js';
+import { dashFor, drawingFill } from '../drawingLook.js';
+
+/** How strongly the middle line shows. */
+const MIDDLE_ALPHA = 0.7;
+/** A base line narrower than this across, px, is upright: its parallel moves sideways. */
+const UPRIGHT_PX = 0.5;
+
+export class ParallelChannelTool extends DrawingBase {
+  descriptor = {
+    type: 'parallelChannel' as const,
+    name: 'Parallel Channel',
+    requiredAnchors: 3,
+    fill: true,
+    options: {
+      ...extendOptions(),
+      // On for a new channel: the line halfway is the one read most. A saved one stays without.
+      middleLine: { kind: 'boolean' as const, label: 'Middle line', default: true, savedDefault: false },
+    },
+  };
+
+  /** The base line, the parallel through the third anchor, and the line halfway between. */
+  private lines(state: DrawingState, viewport: ViewportState) {
+    const p1 = this.anchorToPixel(state.anchors[0], viewport);
+    const p2 = this.anchorToPixel(state.anchors[1], viewport);
+    const left = this.option<boolean>(state, 'extendLeft');
+    const right = this.option<boolean>(state, 'extendRight');
+    const base = this.extendLine(p1, p2, viewport, left, right);
+    if (state.anchors.length < 3) return { base, parallel: null, middle: null, corners: null };
+
+    const p3 = this.anchorToPixel(state.anchors[2], viewport);
+    // The base line moved straight up or down to the third anchor, as its alerts read it
+    // (`priceAt`): over the same bars, so a steep channel doesn't slide off in time. An upright
+    // base line moves sideways instead.
+    const dx = p2.x - p1.x;
+    const upright = Math.abs(dx) < UPRIGHT_PX;
+    const baseY = upright ? p3.y : p1.y + ((p3.x - p1.x) * (p2.y - p1.y)) / dx;
+    const off = upright ? { x: p3.x - p1.x, y: 0 } : { x: 0, y: p3.y - baseY };
+    const shift = (p: Point, k: number): Point => ({ x: p.x + off.x * k, y: p.y + off.y * k });
+    const p1b = shift(p1, 1);
+    const p2b = shift(p2, 1);
+    return {
+      base,
+      parallel: this.extendLine(p1b, p2b, viewport, left, right),
+      middle: this.option<boolean>(state, 'middleLine')
+        ? this.extendLine(shift(p1, 0.5), shift(p2, 0.5), viewport, left, right)
+        : null,
+      corners: [p1, p2, p2b, p1b] as const,
+    };
+  }
+
+  /**
+   * Its first two handles at its points; the third on its parallel, halfway along, not where
+   * it was clicked (often past the span, off every drawn line). Dragged, it sets the third point
+   * where it is let go, so the parallel goes through it.
+   */
+  protected override handlePoints(state: DrawingState, viewport: ViewportState): Point[] {
+    const points = super.handlePoints(state, viewport);
+    const { corners } = this.lines(state, viewport);
+    if (!corners || points.length < 3) return points;
+    const [, , q2, q1] = corners;
+    return [points[0], points[1], { x: (q1.x + q2.x) / 2, y: (q1.y + q2.y) / 2 }];
+  }
+
+  render(ctx: CanvasRenderingContext2D, state: DrawingState, viewport: ViewportState, selected: boolean): void {
+    if (state.anchors.length < 2) return;
+    const { base, parallel, middle, corners } = this.lines(state, viewport);
+
+    // The fill between the anchors' span first, so it doesn't dim the lines over it.
+    if (corners && state.style.fillColor) {
+      ctx.fillStyle = drawingFill(state.style);
+      ctx.beginPath();
+      ctx.moveTo(corners[0].x, corners[0].y);
+      for (const p of corners.slice(1)) ctx.lineTo(p.x, p.y);
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    this.applyLineStyle(ctx, state.style);
+    for (const line of [base, parallel]) {
+      if (!line) continue;
+      ctx.beginPath();
+      ctx.moveTo(line[0].x, line[0].y);
+      ctx.lineTo(line[1].x, line[1].y);
+      ctx.stroke();
+    }
+    // The middle line dashed, a little lighter: a guide between the sides.
+    if (middle) {
+      ctx.setLineDash(dashFor('dashed', state.style.lineWidth));
+      ctx.lineCap = 'butt';
+      ctx.globalAlpha = MIDDLE_ALPHA;
+      ctx.beginPath();
+      ctx.moveTo(middle[0].x, middle[0].y);
+      ctx.lineTo(middle[1].x, middle[1].y);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+    this.resetLineStyle(ctx);
+    if (selected) this.renderAnchorHandles(ctx, state, viewport);
+  }
+
+  /** The base line, the parallel, and the middle line when drawn. */
+  priceAt(state: DrawingState, time: number, viewport?: ViewportState): number[] | null {
+    if (state.anchors.length < 3) return null;
+    const [a, b, c] = state.anchors;
+    const space = lineSpace(viewport);
+    const base = this.lineValueAt(a, b, time, this.option(state, 'extendLeft'), this.option(state, 'extendRight'), space);
+    const throughC = this.lineValueAt(a, b, c.time, true, true, space);
+    if (base === null || throughC === null) return null;
+    // The parallel is the base line moved to C on screen, so the offset is in `space`.
+    const offset = space.value(c.price) - throughC;
+    const values = [base, base + offset];
+    if (this.option<boolean>(state, 'middleLine')) values.push(base + offset / 2);
+    return values.map(space.price);
+  }
+
+  hitTest(point: Point, state: DrawingState, viewport: ViewportState, tolerance: number): boolean {
+    if (state.anchors.length < 2) return false;
+    const { base, parallel, middle } = this.lines(state, viewport);
+    return [base, parallel, middle].some((line) => line !== null && this.distanceToLine(point, line[0], line[1]) <= tolerance);
+  }
+}

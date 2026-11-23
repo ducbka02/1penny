@@ -1,0 +1,127 @@
+// @vitest-environment jsdom
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { WidgetChartNav, type ChartNavActions } from '../WidgetChartNav.js';
+import { EN_TRANSLATOR } from '../i18n.js';
+
+let host: HTMLDivElement;
+let actions: ChartNavActions;
+let nav: WidgetChartNav;
+
+beforeEach(() => {
+  vi.useFakeTimers();
+  host = document.createElement('div');
+  document.body.appendChild(host);
+  actions = { zoomIn: vi.fn(), zoomOut: vi.fn(), scroll: vi.fn(), reset: vi.fn(), plotRect: () => ({ x: 0, y: 0, width: 600, height: 300 }) };
+  nav = new WidgetChartNav(host, actions, EN_TRANSLATOR);
+});
+
+afterEach(() => {
+  nav.destroy();
+  host.remove();
+  vi.useRealTimers();
+});
+
+const el = () => host.querySelector<HTMLElement>('.pcw-nav')!;
+const button = (action: string) => el().querySelector<HTMLButtonElement>(`[data-nav="${action}"]`)!;
+/** jsdom has no PointerEvent: a mouse event with a pointer type, near the plot's bottom unless told. */
+const pointer = (type: string, pointerType = 'mouse', bubbles = true, clientY = 290) => {
+  const e = new MouseEvent(type, { bubbles, button: 0, clientX: 300, clientY });
+  Object.defineProperty(e, 'pointerType', { value: pointerType });
+  return e;
+};
+const press = (b: HTMLElement) => b.dispatchEvent(pointer('pointerdown'));
+const release = (b: HTMLElement) => b.dispatchEvent(pointer('pointerup'));
+
+describe('WidgetChartNav', () => {
+  it('shows over the chart while the pointer is on it, centred on the plot’s bottom', () => {
+    expect(el().classList.contains('pcw-nav-shown')).toBe(false);
+    host.dispatchEvent(pointer('pointermove'));
+    expect(el().classList.contains('pcw-nav-shown')).toBe(true);
+    expect(el().style.left).toBe('300px');
+    expect(el().style.top).toBe('300px');
+    host.dispatchEvent(pointer('pointerleave', 'mouse', false));
+    expect(el().classList.contains('pcw-nav-shown')).toBe(false);
+  });
+
+  it('stands higher by what it is told to clear, and comes back down', () => {
+    nav.setLift(26);
+    host.dispatchEvent(pointer('pointermove'));
+    expect(el().style.top).toBe('274px');
+    // Told while it is up: it moves at once.
+    nav.setLift(0);
+    expect(el().style.top).toBe('300px');
+  });
+
+  it('steps aside while told to, wherever the pointer goes, and shows again after', () => {
+    host.dispatchEvent(pointer('pointermove'));
+    nav.setSuppressed(true);
+    expect(el().classList.contains('pcw-nav-shown')).toBe(false);
+    host.dispatchEvent(pointer('pointermove'));
+    expect(el().classList.contains('pcw-nav-shown')).toBe(false);
+    nav.setSuppressed(false);
+    host.dispatchEvent(pointer('pointermove'));
+    expect(el().classList.contains('pcw-nav-shown')).toBe(true);
+  });
+
+  it('shows only while the pointer is near the plot’s bottom, out of the way of the data', () => {
+    host.dispatchEvent(pointer('pointermove', 'mouse', true, 100));
+    expect(el().classList.contains('pcw-nav-shown')).toBe(false);
+    host.dispatchEvent(pointer('pointermove', 'mouse', true, 260));
+    expect(el().classList.contains('pcw-nav-shown')).toBe(true);
+    host.dispatchEvent(pointer('pointermove', 'mouse', true, 120));
+    expect(el().classList.contains('pcw-nav-shown')).toBe(false);
+  });
+
+  it('stays shown while a button has the keyboard’s focus, wherever the pointer is', () => {
+    button('zoomIn').focus();
+    host.dispatchEvent(pointer('pointermove', 'mouse', true, 100));
+    expect(el().classList.contains('pcw-nav-shown')).toBe(true);
+  });
+
+  it('goes once the pointer leaves the strip after a click, though the button keeps focus', () => {
+    host.dispatchEvent(pointer('pointermove', 'mouse', true, 290));
+    button('zoomIn').dispatchEvent(pointer('pointerdown'));
+    button('zoomIn').focus();
+    button('zoomIn').click();
+    host.dispatchEvent(pointer('pointermove', 'mouse', true, 100));
+    expect(el().classList.contains('pcw-nav-shown')).toBe(false);
+  });
+
+  it('keeps a held scroll going while the pointer drifts out of the strip', () => {
+    press(button('scrollLeft'));
+    host.dispatchEvent(pointer('pointermove', 'mouse', true, 100));
+    vi.advanceTimersByTime(300 + 80 * 3);
+    expect((actions.scroll as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(2);
+    release(button('scrollLeft'));
+  });
+
+  it('stays hidden for a touch', () => {
+    host.dispatchEvent(pointer('pointermove', 'touch'));
+    expect(el().classList.contains('pcw-nav-shown')).toBe(false);
+  });
+
+  it('zooms, resets, and labels its buttons', () => {
+    button('zoomIn').click();
+    button('zoomOut').click();
+    button('reset').click();
+    expect(actions.zoomIn).toHaveBeenCalledTimes(1);
+    expect(actions.zoomOut).toHaveBeenCalledTimes(1);
+    expect(actions.reset).toHaveBeenCalledTimes(1);
+    expect(button('zoomIn').getAttribute('aria-label')).toBe('Zoom in');
+    expect(button('scrollLeft').getAttribute('aria-label')).toBe('Scroll left');
+  });
+
+  it('scrolls on a press, and keeps scrolling while held', () => {
+    press(button('scrollRight'));
+    expect(actions.scroll).toHaveBeenCalledWith(1);
+    vi.advanceTimersByTime(300 + 4 * 80);
+    const held = (actions.scroll as ReturnType<typeof vi.fn>).mock.calls.length;
+    expect(held).toBeGreaterThan(3);
+    release(button('scrollRight'));
+    vi.advanceTimersByTime(1000);
+    expect((actions.scroll as ReturnType<typeof vi.fn>).mock.calls.length).toBe(held);
+    press(button('scrollLeft'));
+    expect(actions.scroll).toHaveBeenLastCalledWith(-1);
+    release(button('scrollLeft'));
+  });
+});

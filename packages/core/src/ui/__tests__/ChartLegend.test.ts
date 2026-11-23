@@ -1,0 +1,223 @@
+import { describe, it, expect, vi } from 'vitest';
+import type { ViewportState, OHLCBar, DataSeries } from '@1penny/commons';
+import { DARK_THEME, resolveChartTheme } from '@1penny/commons';
+import { ChartLegend } from '../ChartLegend.js';
+
+function viewport(min: number, max: number): ViewportState {
+  return {
+    visibleRange: { from: 0, to: 10 },
+    priceRange: { min, max },
+    barWidth: 6,
+    barSpacing: 2,
+    offset: 0,
+    chartRect: { x: 0, y: 0, width: 200, height: 100 },
+  };
+}
+
+function bar(overrides: Partial<OHLCBar> = {}): OHLCBar {
+  return { time: 0, open: 0.336, high: 0.339, low: 0.335, close: 0.337, volume: 1000, ...overrides };
+}
+
+function mockCtx() {
+  const fillTextCalls: string[] = [];
+  return {
+    ctx: {
+      save: vi.fn(),
+      restore: vi.fn(),
+      fillText: vi.fn((text: string) => fillTextCalls.push(text)),
+      fillRect: vi.fn(),
+      measureText: vi.fn(() => ({ width: 10 })),
+      beginPath: vi.fn(),
+      moveTo: vi.fn(),
+      lineTo: vi.fn(),
+      stroke: vi.fn(),
+      set font(_v: string) {},
+      set fillStyle(_v: string) {},
+      set strokeStyle(_v: string) {},
+      set textAlign(_v: string) {},
+      set textBaseline(_v: string) {},
+      set globalAlpha(_v: number) {},
+      set lineWidth(_v: number) {},
+    } as unknown as CanvasRenderingContext2D,
+    fillTextCalls,
+  };
+}
+
+describe('ChartLegend — OHLC precision and locale', () => {
+  it('derives decimals from the price range instead of a hardcoded 2, so sub-$1 assets are legible', () => {
+    const legend = new ChartLegend();
+    const data: DataSeries = [bar({ close: 0.337 }), bar({ close: 0.341 })];
+    const { ctx, fillTextCalls } = mockCtx();
+
+    // A tight price range around ~0.34 needs 4 decimals, not 2.
+    legend.render(ctx, viewport(0.335, 0.342), DARK_THEME, data);
+
+    const ohlcLine = fillTextCalls.find((t) => /^0[.,]\d+$/.test(t));
+    expect(ohlcLine).toBeDefined();
+    expect(ohlcLine).not.toBe('0.34');
+  });
+
+  it('formats OHLC and change values using the configured locale', () => {
+    const legend = new ChartLegend();
+    legend.setLocale('vi-VN');
+    const data: DataSeries = [bar({ close: 0.336 }), bar({ close: 0.341 })];
+    const { ctx, fillTextCalls } = mockCtx();
+
+    legend.render(ctx, viewport(0.335, 0.342), DARK_THEME, data);
+
+    // vi-VN uses a comma decimal separator.
+    expect(fillTextCalls.some((t) => t.includes(','))).toBe(true);
+    expect(fillTextCalls.some((t) => /^\d+\.\d+$/.test(t))).toBe(false);
+  });
+});
+
+describe('ChartLegend — sub-cent assets', () => {
+  // PEPE-like prices: ~0.0000043 with a range of ~3e-7.
+  const pepe = (close: number): OHLCBar => ({ time: 0, open: 0.000004343, high: 0.000004401, low: 0.000004311, close, volume: 1 });
+
+  it('follows the axis precision instead of rounding to 0.00', () => {
+    const legend = new ChartLegend();
+    const { ctx, fillTextCalls } = mockCtx();
+    legend.render(ctx, viewport(0.0000042, 0.0000045), DARK_THEME, [pepe(0.000004343), pepe(0.000004349)]);
+    expect(fillTextCalls).not.toContain('0.00');
+    expect(fillTextCalls).toContain('0.000004343'); // open, four figures of it: the step's 8 decimals left three
+  });
+
+  it("uses a market's explicit precision and the number locale when set", () => {
+    const legend = new ChartLegend();
+    legend.setLocale('vi-VN');
+    legend.setPricePrecision(10);
+    const { ctx, fillTextCalls } = mockCtx();
+    legend.render(ctx, viewport(0.0000042, 0.0000045), DARK_THEME, [pepe(0.000004343), pepe(0.000004349)]);
+    expect(fillTextCalls).toContain('0,0000043430');
+  });
+});
+
+describe('ChartLegend.getHeight', () => {
+  it('covers the rows it draws, and nothing when hidden', () => {
+    const legend = new ChartLegend();
+    legend.setConfig({ showSymbol: false, showOHLC: true, showVolume: true, fontSize: 12 });
+    expect(legend.getHeight()).toBe(8 + 16 + 14);
+    legend.setConfig({ showVolume: false });
+    expect(legend.getHeight()).toBe(8 + 16);
+    legend.setConfig({ visible: false });
+    expect(legend.getHeight()).toBe(0);
+  });
+
+  it('says how far right of the plot’s edge its rows reach, as last drawn', () => {
+    const legend = new ChartLegend();
+    legend.setConfig({ showSymbol: false, showOHLC: true, showChange: false, showVolume: true, fontSize: 12 });
+    expect(legend.getWidth()).toBe(0); // not drawn yet
+    const { ctx } = mockCtx();
+    legend.render(ctx, viewport(0, 1), DARK_THEME, [bar(), bar()]);
+    // O, H, L and C: a 10 px label and a 10 px value each, 10 px apart (measureText says 10), from 8 in.
+    expect(legend.getWidth()).toBe(12 + 4 * 20 + 3 * 10);
+    legend.setConfig({ visible: false });
+    expect(legend.getWidth()).toBe(0);
+  });
+
+  it('takes no room at the top left when drawn in the top-right corner', () => {
+    const legend = new ChartLegend();
+    legend.setConfig({ showSymbol: false, showOHLC: true, showVolume: false, fontSize: 12, position: 'top-right' });
+    expect(legend.getHeight()).toBe(0);
+    legend.render(mockCtx().ctx, viewport(0, 1), DARK_THEME, [bar(), bar()]);
+    expect(legend.getWidth()).toBe(0);
+  });
+});
+
+describe('ChartLegend.setSpacing', () => {
+  it('stands 12 px in and 8 px down by default, and 8 and 6 on a compact chart', () => {
+    const legend = new ChartLegend();
+    legend.setConfig({ showSymbol: false, showOHLC: true, showChange: false, showVolume: true, fontSize: 12 });
+    expect(legend.getInset()).toBe(12);
+    expect(legend.getHeight()).toBe(8 + 16 + 14);
+    legend.setSpacing({ inset: 8, top: 6, lineGap: 3 });
+    expect(legend.getInset()).toBe(8);
+    expect(legend.getHeight()).toBe(6 + 15 + 14);
+  });
+
+  it('draws its first row at the inset and the top it was given', () => {
+    const legend = new ChartLegend();
+    legend.setSpacing({ inset: 8, top: 6, lineGap: 3 });
+    const { ctx } = mockCtx();
+    const vp = viewport(0.335, 0.342);
+    legend.render(ctx, vp, DARK_THEME, [bar()]);
+    const [, x, y] = vi.mocked(ctx.fillText).mock.calls[0];
+    expect([x, y]).toEqual([vp.chartRect.x + 8, vp.chartRect.y + 6]);
+  });
+});
+
+describe('ChartLegend resize listener', () => {
+  const draw = (legend: ChartLegend) => legend.render(mockCtx().ctx, viewport(0, 1), DARK_THEME, [bar(), bar()]);
+
+  it('is called after a draw that changed the height, not after one that kept it', () => {
+    const legend = new ChartLegend();
+    const calls = vi.fn();
+    legend.setResizeListener(calls);
+    draw(legend);
+    expect(calls).toHaveBeenCalledTimes(1);
+    draw(legend);
+    expect(calls).toHaveBeenCalledTimes(1);
+  });
+
+  // Between the change and the draw its height is a guess, which a host may have read and placed rows by.
+  it('is called after the first draw since a change that could move it, even at the height it had', () => {
+    const legend = new ChartLegend();
+    const calls = vi.fn();
+    legend.setResizeListener(calls);
+    draw(legend);
+    legend.setTimeframe('1m');
+    draw(legend);
+    expect(calls).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('ChartLegend — volume in Korean units', () => {
+  it('writes the volume in 만, 억 and 조 when the numbers are Korean', () => {
+    const legend = new ChartLegend();
+    legend.setLocale('ko-KR');
+    const { ctx, fillTextCalls } = mockCtx();
+    legend.render(ctx, viewport(0.335, 0.342), DARK_THEME, [bar({ volume: 24_580 })]);
+    expect(fillTextCalls).toContain('Vol 2.46만');
+  });
+
+  it('keeps K and M in other locales', () => {
+    const legend = new ChartLegend();
+    const { ctx, fillTextCalls } = mockCtx();
+    legend.render(ctx, viewport(0.335, 0.342), DARK_THEME, [bar({ volume: 24_580 })]);
+    expect(fillTextCalls).toContain('Vol 24.58K');
+  });
+
+  it('writes K, M and B in the locale’s own decimal mark', () => {
+    const legend = new ChartLegend();
+    legend.setLocale('de-DE');
+    const { ctx, fillTextCalls } = mockCtx();
+    legend.render(ctx, viewport(0.335, 0.342), DARK_THEME, [bar({ volume: 24_580 })]);
+    expect(fillTextCalls).toContain('Vol 24,58K');
+  });
+});
+
+describe('ChartLegend — up and down colours', () => {
+  it('colours the close and the change by the legend’s keys, not the candles’', () => {
+    const hidden = 'rgba(0, 0, 0, 0)';
+    const theme = resolveChartTheme(DARK_THEME, 'candlestick', {
+      'series.candlestick.upColor': hidden,
+      'series.candlestick.downColor': hidden,
+      'legend.upColor': '#00ff00',
+      'legend.downColor': '#ff0000',
+    });
+    const drawn: { text: string; fill: string }[] = [];
+    let fill = '';
+    const { ctx } = mockCtx();
+    Object.defineProperty(ctx, 'fillStyle', { set: (v: string) => { fill = v; }, get: () => fill });
+    (ctx.fillText as unknown as ReturnType<typeof vi.fn>).mockImplementation((text: string) => drawn.push({ text, fill }));
+    const legend = new ChartLegend();
+    const data: DataSeries = [bar({ open: 0.336, close: 0.336 }), bar({ open: 0.336, close: 0.3381 })];
+    legend.render(ctx, viewport(0.335, 0.342), theme, data);
+    const close = drawn.find((d) => d.text.startsWith('0.3381'));
+    const change = drawn.find((d) => d.text.startsWith('+'));
+    expect(close?.fill).toBe('#00ff00');
+    expect(change?.fill).toBe('#00ff00');
+    expect(drawn.some((d) => d.fill === hidden)).toBe(false);
+  });
+});

@@ -1,0 +1,550 @@
+import type { OHLCBar, TimeFrame } from './ohlc.js';
+import type { ConnectionInfo } from './realtime.js';
+import type { Point } from './rendering.js';
+import type { IndicatorValue } from './indicator.js';
+import type { DrawingToolType } from './drawing.js';
+import type { SymbolInfo } from './symbol.js';
+import type { MarketConfig } from '../market/types.js';
+import type { FillEvent } from './execution.js';
+import type { TradingOrder, TradingPosition } from './trading.js';
+
+export type ChartEventType =
+  | 'crosshairMove'
+  | 'crosshairLeave'
+  /** Another chart's crosshair is mirrored here (`setCrosshairTime`), or no longer is. */
+  | 'crosshairSync'
+  | 'click'
+  | 'barClick'
+  | 'visibleRangeChange'
+  | 'priceRangeChange'
+  | 'zoomChange'
+  | 'dataUpdate'
+  | 'historyLoad'
+  | 'symbolInfoChange'
+  /** The market's rules changed (`setMarket`): its steps, colours, decimals, zone. */
+  | 'marketChange'
+  /** A compare line was added, taken off, given new bars, shown or hidden (`addCompareSymbol` and the rest). */
+  | 'compareChange'
+  | 'indicatorAdd'
+  | 'indicatorRemove'
+  | 'paneResize'
+  /**
+   * The legend was drawn taller or shorter (its line wrapped, a status came
+   * or went): `{ bottom }`, the new `getLegendBottom()`, where content
+   * stacked under it moves to.
+   */
+  | 'legendResize'
+  /** A pane was folded or opened, maximised or put back, or moved up or down. */
+  | 'paneChange'
+  | 'indicatorUpdate'
+  | 'indicatorChange'
+  | 'themeChange'
+  /** Style overrides changed (`applyOverrides`, `resetOverrides`, a layout loaded). */
+  | 'styleChange'
+  | 'resize'
+  | 'orderPlace'
+  | 'orderModify'
+  | 'orderCancel'
+  | 'positionClose'
+  | 'positionReverse'
+  | 'positionModify'
+  | 'executionFill'
+  | 'ordersChange'
+  | 'positionsChange'
+  | 'executionError'
+  | 'bracketPlace'
+  /** A confirmed bracket the execution adapter took, as the order it placed. */
+  | 'bracketOrder'
+  | 'drawingCreate'
+  | 'drawingUpdate'
+  | 'drawingDoubleClick'
+  | 'drawingContextMenu'
+  | 'toolModeChange'
+  | 'crosshairCursorChange'
+  | 'chartContextMenu'
+  | 'priceAxisAdd'
+  | 'drawingRemove'
+  | 'drawingToolChange'
+  | 'signalMarkerAdd'
+  | 'signalMarkerRemove'
+  /** The pointer went onto a signal marker, or off it (`marker: null`). */
+  | 'signalMarkerHover'
+  /** A signal marker was clicked. */
+  | 'signalMarkerClick'
+  /** The pointer went onto a mark's badge, or off it (`marks: null`). */
+  | 'markHover'
+  /** A mark's badge was clicked: every mark it holds. */
+  | 'markClick'
+  /** The marks on the chart changed (`setMarks`, `addMark`, `removeMark`, `clearMarks`). */
+  | 'marksChange'
+  | 'tradeZoneAdd'
+  | 'tradeZoneRemove'
+  | 'alertAdd'
+  | 'alertRemove'
+  | 'alertTriggered'
+  /** An alert reached its `expiresAt` without firing. */
+  | 'alertExpired'
+  | 'symbolSeriesRequest'
+  /** A replay step: the bar forming, when it opened, and up to when the replay has shown. */
+  | 'replayStep'
+  /** A replay started playing, paused or ended. */
+  | 'replayState'
+  /** A replay reached its last bar (it waits there, paused). */
+  | 'replayComplete'
+  /** A replay's finer bars (its `step`) are fetched: loading, loaded, no more, or failed. */
+  | 'replayStepsLoad'
+  | 'alertUpdate'
+  /**
+   * Something a saved layout holds may have changed: drawings, indicators,
+   * alerts, the chart type or the theme. Fires often; debounce it.
+   */
+  | 'stateChange'
+  /** The chart type changed (`setChartType`). */
+  | 'chartTypeChange'
+  /** The stream moved to another symbol (`connect`, `switchStream`). */
+  | 'symbolChange'
+  /** The stream moved to another timeframe (`connect`, `setTimeframe`, `switchStream`). */
+  | 'timeframeChange'
+  /** The undo history changed: whether there is something to undo or redo. */
+  | 'historyChange'
+  /** The drawings selected changed. */
+  | 'drawingSelect'
+  /** The chart started drawing with another renderer (`renderer` option, `setRenderer`, a lost GPU). */
+  | 'rendererChange';
+
+export interface ChartEvent<T = unknown> {
+  type: ChartEventType;
+  timestamp: number;
+  payload: T;
+}
+
+export interface CrosshairMovePayload {
+  point: Point;
+  bar?: OHLCBar;
+  barIndex?: number;
+  /**
+   * When the bar stands, as the time axis dates it: `bar.time` on candles;
+   * on Renko, Kagi and the like, whose own times only count them, the time
+   * of the bar it was finished on.
+   */
+  time?: number;
+  /** The close of the bar drawn before it (on Renko, the brick before), for a change. */
+  prevClose?: number;
+  indicatorValues?: Record<string, IndicatorValue>;
+}
+
+/**
+ * Payload for `crosshairSync`: `setCrosshairTime` (a grid mirroring another
+ * chart's crosshair) put this chart's time-only crosshair on bar `barIndex`,
+ * or took it away (`barIndex: null`). Fired once per bar, never as
+ * `crosshairMove`, so linked charts don't echo each other. `bar` is missing
+ * when the time lies before or past the bars.
+ */
+export interface CrosshairSyncPayload {
+  barIndex: number | null;
+  bar?: OHLCBar;
+  /** When the bar stands, as the time axis dates it (see `CrosshairMovePayload.time`). */
+  time?: number;
+  /** The close of the bar drawn before it. */
+  prevClose?: number;
+}
+
+/**
+ * Payload for `visibleRangeChange`. Fired whenever the horizontal viewport
+ * moves — panning, zooming, resizing, `setVisibleRange`, `scrollToEnd`,
+ * `fitContent`, or a data update that shifts the range.
+ *
+ * `from` / `to` are **bar indices** into the current data series (integers,
+ * clamped to `[0, data.length - 1]`), not timestamps. Resolve to time with
+ * `chart.getData()[from].time`.
+ */
+export interface VisibleRangeChangePayload {
+  from: number;
+  to: number;
+}
+
+export interface BarClickPayload {
+  bar: OHLCBar;
+  barIndex: number;
+  point: Point;
+}
+
+export interface OrderModifyPayload {
+  orderId: string;
+  newPrice: number;
+}
+
+export interface OrderCancelPayload {
+  orderId: string;
+}
+
+export interface PositionModifyPayload {
+  positionId: string;
+  stopLoss?: number;
+  takeProfit?: number;
+  /** The distance the stop-loss is to trail the price by; null ends the trail. */
+  trailingStop?: number | null;
+}
+
+export interface PositionClosePayload {
+  positionId: string;
+}
+
+export interface OrderPlacePayload {
+  side: 'buy' | 'sell';
+  type: 'market' | 'limit' | 'stop' | 'stopLimit';
+  price: number;
+  stopPrice?: number;
+  quantity?: number;
+  /** Stop-loss and take-profit for the position the order opens. */
+  stopLoss?: number;
+  takeProfit?: number;
+  /** The distance, in price, the position's stop-loss is to trail the price by. */
+  trailingStop?: number;
+  /** How long the order works. */
+  timeInForce?: 'gtc' | 'day';
+}
+
+export interface ExecutionErrorPayload {
+  message: string;
+  cause?: unknown;
+  /** The chart's intent whose command failed (`'orderPlace'`, `'bracketPlace'`…), when it was one. */
+  command?: string;
+  /**
+   * Why the chart sent it no further, when that was the chart's call and not
+   * the adapter's: a bracket with no quantity (`'noQuantity'`), or no price yet
+   * to tell a limit entry from a stop (`'noPrice'`).
+   */
+  reason?: 'noQuantity' | 'noPrice';
+}
+
+export interface BracketPlacePayload {
+  side: 'buy' | 'sell';
+  entry: number;
+  stopLoss: number;
+  takeProfit: number;
+  quantity?: number;
+  /** Reward-to-risk ratio = |TP − entry| / |entry − SL|. */
+  riskReward: number;
+}
+
+export interface IndicatorChangePayload {
+  instanceId: string;
+  id: string;
+}
+
+export interface ThemeChangePayload {
+  theme: string;
+}
+
+/** Which layer of overrides changed: the host's or the user's. */
+export interface StyleChangePayload {
+  layer: 'host' | 'user';
+}
+
+export interface ResizePayload {
+  width: number;
+  height: number;
+}
+
+/**
+ * Payload for `zoomChange`. Fired when the horizontal zoom level changes
+ * (wheel zoom, keyboard zoom, time-axis drag).
+ *
+ * `barWidth` is the rendered width of a single bar in **CSS pixels** — the
+ * value `Viewport.zoom()` mutates. Larger means zoomed in.
+ */
+export interface ZoomChangePayload {
+  barWidth: number;
+}
+
+/**
+ * Payload for `priceRangeChange`. Fired when the vertical (price) range
+ * changes — auto-scale after a pan/zoom/data update, or a manual price-axis
+ * drag-scale.
+ *
+ * `min` / `max` are prices in the data's own units, bounding the visible
+ * area of the main pane.
+ */
+export interface PriceRangeChangePayload {
+  min: number;
+  max: number;
+}
+
+export interface DrawingCreatePayload {
+  id: string;
+  type: string;
+  /** Made with the pointer just now: not added from code, pasted, or brought back by undo or redo. */
+  drawn?: boolean;
+}
+
+export interface DrawingRemovePayload {
+  id: string;
+}
+
+/** Where a right-click landed: the price pane, another pane, or an axis. */
+export type ChartContextArea = 'plot' | 'pane' | 'priceAxis' | 'timeAxis';
+
+/**
+ * Payload for `chartContextMenu`: a right-click off any drawing, where it was
+ * (`x`, `y` in the chart's pixels), and the price and bar time there when the
+ * area has them (the price pane: both; the price axis: price; the time axis: time).
+ */
+export interface ChartContextMenuPayload {
+  area: ChartContextArea;
+  x: number;
+  y: number;
+  price?: number;
+  time?: number;
+  /** For a pane: the indicator whose pane it is. */
+  pane?: string;
+}
+
+/** Payload for `priceAxisAdd`: the "+" by the price axis was clicked at `price`. */
+export interface PriceAxisAddPayload {
+  price: number;
+  x: number;
+  y: number;
+}
+
+export interface SignalMarkerAddPayload {
+  id: string;
+  source: string;
+  direction: string;
+}
+
+export interface SignalMarkerRemovePayload {
+  id: string;
+}
+
+export interface TradeZoneAddPayload {
+  id: string;
+  direction: string;
+}
+
+export interface TradeZoneRemovePayload {
+  id: string;
+}
+
+export interface AlertPayload {
+  id: string;
+  /** The level; for an alert on another line, that line's latest value; NaN for a move. */
+  price: number;
+  condition: string;
+  message?: string;
+  triggered: boolean;
+  /** What it watches: `'price'` or `<instanceId>:<key>`. */
+  channel?: string;
+  label?: string;
+  /** The line it compares with. */
+  target?: string;
+  /** The drawing it watches. */
+  drawingId?: string;
+  /** A move: the percent, within how many bars. */
+  percent?: number;
+  bars?: number;
+}
+
+/**
+ * Payload for `historyLoad`: paging older bars in. `loading` when a request
+ * starts, then `loaded` (`count` bars added), `end` (no older bars) or
+ * `error`.
+ */
+export interface HistoryLoadPayload {
+  state: 'loading' | 'loaded' | 'end' | 'error';
+  count: number;
+  error?: string;
+}
+
+/** What changed on an indicator (`indicatorChange`). */
+export interface IndicatorSettingsChangePayload {
+  instanceId: string;
+  change: 'visible' | 'style' | 'levels' | 'params' | 'pane' | 'scale' | 'intervals';
+}
+
+/**
+ * What `dataUpdate` says changed, by `kind`:
+ * - `bars`: the series is `length` bars now: `setData`, a bar appended (by
+ *   hand or by the stream), a reconnect's bars, the hours shown changing.
+ *   A tick on the forming bar sends none (`indicatorUpdate` follows those),
+ *   nor do older bars paged in (`historyLoad`) or a replay's steps
+ *   (`replayStep`).
+ * - `correction`: the bar shown at `index`, at `time`, has new values
+ *   (`updateBar`, or a feed sending an older bar again as closed); the
+ *   series is as long as it was. None for a bar outside the hours shown or
+ *   during a replay, nor for one sent again with the same values.
+ * - `alert`: an alert went off (`alertTriggered` says more).
+ * - `bracket`: the bracket being placed was cancelled with Esc.
+ * - `connection`: the stream's connection changed.
+ * - `error`: the stream failed.
+ */
+export type DataUpdatePayload =
+  | { kind: 'bars'; length: number }
+  | { kind: 'correction'; time: number; index: number }
+  | { kind: 'alert'; alert: 'triggered'; alertId: string; price: number; message?: string }
+  | { kind: 'bracket'; bracket: 'cancelled' }
+  | { kind: 'connection'; connection: ConnectionInfo }
+  | { kind: 'error'; error: string };
+
+export interface ChartEventMap {
+  crosshairMove: CrosshairMovePayload;
+  /** The pointer left the plot; the crosshair is gone. */
+  crosshairLeave: Record<string, never>;
+  crosshairSync: CrosshairSyncPayload;
+  click: { x: number; y: number };
+  barClick: BarClickPayload;
+  visibleRangeChange: VisibleRangeChangePayload;
+  priceRangeChange: PriceRangeChangePayload;
+  zoomChange: ZoomChangePayload;
+  dataUpdate: DataUpdatePayload;
+  /** Older bars are being paged in, or finished loading. */
+  historyLoad: HistoryLoadPayload;
+  /** What is known about the symbol on the chart changed (`setSymbolInfo`, or the stream's adapter). */
+  symbolInfoChange: { info: SymbolInfo | null };
+  /** The market's rules changed (`setMarket`); its zone backs `getExchangeTimeZone` when the symbol names none. */
+  marketChange: { market: MarketConfig };
+  /** A compare line changed: added, taken off (each one `clearCompareSymbols` takes too), given new bars (`updateCompareData`), shown or hidden (`setCompareVisible`). */
+  compareChange: { id: string; change: 'add' | 'remove' | 'data' | 'visible' };
+  chartTypeChange: { type: string; previous: string };
+  /**
+   * What draws the chart now. `reason` says why: no WebGL 2 here (or only a
+   * slow software one, with 'auto'), the GPU context was lost or came back,
+   * or the charts on the page draw with as many WebGL contexts as they may
+   * (`setMaxWebGLCharts`; WebGL follows once one is let go).
+   */
+  rendererChange: { renderer: 'canvas' | 'webgl'; reason?: 'unsupported' | 'contextLost' | 'contextRestored' | 'limit' };
+  symbolChange: { symbol: string; previous: string | null };
+  timeframeChange: { timeframe: string; previous: string | null };
+  historyChange: { canUndo: boolean; canRedo: boolean };
+  /** The selected drawings' ids, the primary (its handles show) first; none: nothing selected. */
+  drawingSelect: { ids: string[]; primary: string | null };
+  indicatorAdd: IndicatorChangePayload;
+  indicatorRemove: IndicatorChangePayload;
+  /** An indicator pane was resized (by dragging its divider or `setPanelSize`). */
+  paneResize: { instanceId: string; size: number };
+  /** The legend was drawn taller or shorter, hidden or shown again: `bottom` is the new `getLegendBottom()`. */
+  legendResize: { bottom: number };
+  /** A pane was folded or opened, maximised or put back, or moved up or down. */
+  paneChange: { instanceId: string; change: 'collapsed' | 'maximized' | 'order' | 'scale' };
+  /** Indicator values were recomputed from bar index `from` on: new bars, a live tick, a replay step. */
+  indicatorUpdate: { from: number };
+  /** One indicator's settings changed: shown or hidden, restyled, new levels or inputs, moved to another pane. */
+  indicatorChange: IndicatorSettingsChangePayload;
+  themeChange: ThemeChangePayload;
+  styleChange: StyleChangePayload;
+  /** The chart's size changed: its element was resized (a window, a rotation, a panel beside it) or `resize()` was called. */
+  resize: ResizePayload;
+  orderPlace: OrderPlacePayload;
+  bracketPlace: BracketPlacePayload;
+  /** A confirmed bracket the execution adapter took, as the order it placed (`connectExecution(adapter, { brackets: 'place' })`). */
+  bracketOrder: { order: TradingOrder; bracket: BracketPlacePayload };
+  orderModify: OrderModifyPayload;
+  orderCancel: OrderCancelPayload;
+  positionClose: PositionClosePayload;
+  positionModify: PositionModifyPayload;
+  executionError: ExecutionErrorPayload;
+  /** An order filled, from the execution adapter or `addFill`. */
+  executionFill: FillEvent;
+  /** The orders on the chart changed (`setOrders`, or the execution adapter): all of them. */
+  ordersChange: { orders: TradingOrder[] };
+  /** The positions on the chart changed (`setPositions`, or the execution adapter): all of them. */
+  positionsChange: { positions: TradingPosition[] };
+  /** The reverse button on a position's tag was pressed. */
+  positionReverse: { positionId: string };
+  /** A right-click off any drawing, where it landed: only while something listens. */
+  chartContextMenu: ChartContextMenuPayload;
+  /** The "+" by the price axis was pressed (`features.priceAxisAddButton`). */
+  priceAxisAdd: PriceAxisAddPayload;
+  drawingCreate: DrawingCreatePayload;
+  drawingRemove: DrawingRemovePayload;
+  /** A drawing changed: moved, restyled, given new text or anchors. */
+  drawingUpdate: { id: string };
+  /**
+   * A double-click or a double tap on a drawing, and where on the chart it
+   * was (px). The widget opens the words it was on to be typed in place, or
+   * the drawing's settings.
+   */
+  drawingDoubleClick: { id: string; x: number; y: number };
+  /** A drawing was right-clicked, at `x`, `y` in the chart's pixels; it is selected. */
+  drawingContextMenu: { id: string; x: number; y: number };
+  /** The eraser or the zoom-area tool turned on or off: the one that changed. */
+  toolModeChange: { eraser?: boolean; zoomArea?: boolean };
+  /** The pointer's look over the chart changed (`setCrosshairCursor`). */
+  crosshairCursorChange: { cursor: import('./chart.js').CrosshairCursor };
+  /** The active drawing tool changed — picked, finished, or cancelled (`tool: null`). */
+  drawingToolChange: { tool: DrawingToolType | null };
+  signalMarkerAdd: SignalMarkerAddPayload;
+  signalMarkerRemove: SignalMarkerRemovePayload;
+  signalMarkerHover: { marker: import('./signal.js').SignalMarker | null; x: number; y: number };
+  signalMarkerClick: { marker: import('./signal.js').SignalMarker; x: number; y: number };
+  markHover: { marks: import('./mark.js').ChartMark[] | null; x: number; y: number };
+  markClick: { marks: import('./mark.js').ChartMark[]; x: number; y: number };
+  marksChange: { count: number };
+  tradeZoneAdd: TradeZoneAddPayload;
+  tradeZoneRemove: TradeZoneRemovePayload;
+  alertAdd: AlertPayload;
+  alertRemove: AlertRemovePayload;
+  alertTriggered: AlertPayload;
+  alertExpired: AlertPayload;
+  /** An indicator reads a symbol the chart has no bars of: give them with `setSymbolSeries`. */
+  symbolSeriesRequest: { symbol: string };
+  replayStep: ReplayStepPayload;
+  replayState: { state: 'playing' | 'paused' | 'stopped' };
+  replayComplete: { barIndex: number; time: number };
+  replayStepsLoad: ReplayStepsLoadPayload;
+  alertUpdate: AlertPayload;
+}
+
+/**
+ * Payload for `replayStepsLoad`: the finer bars that shape a replay's bars as
+ * they form (`step`), fetched a page at a time for the bars it is about to
+ * play. `loading` when a request starts, then `loaded` (`count` finer bars
+ * kept), `end` (the feed has no more, or can't page back) or `error`. Bars
+ * without them form from their own prices.
+ */
+export interface ReplayStepsLoadPayload {
+  state: 'loading' | 'loaded' | 'end' | 'error';
+  /** The finer interval. */
+  step: TimeFrame;
+  count: number;
+  error?: string;
+}
+
+/** Payload for `replayStep`. */
+export interface ReplayStepPayload {
+  /** The chart's bar forming now. */
+  barIndex: number;
+  /** When it opened. */
+  time: number;
+  /**
+   * When the step shown last opened: the bar's own time in whole bars, a
+   * finer bar's inside it in finer steps (14:05 inside the 14:00 bar).
+   * Where a panel reads the replay's date.
+   */
+  stepTime: number;
+  /** The replay has shown everything before this time (the next step's). */
+  until: number;
+  /**
+   * The bars the replay goes through (from its start, when it leaves the
+   * history out). It can change during a replay: the bars it replays are the
+   * live series, which a new symbol or timeframe, `setData` or older bars
+   * change.
+   */
+  total: number;
+  /**
+   * What moved it: the clock (`play`), a jump (`seek`), or the bars under it
+   * changing (`series`: the replay carried over to the same time on them).
+   */
+  cause?: 'play' | 'seek' | 'series';
+}
+
+export interface AlertRemovePayload {
+  id: string;
+}
+
+export interface TauriBridgeOptions {
+  enabled: boolean;
+  eventPrefix?: string;
+}
+
+export type ChartEventHandler<T = unknown> = (event: ChartEvent<T>) => void;

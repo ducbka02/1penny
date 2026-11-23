@@ -1,0 +1,402 @@
+import type { OHLCBar } from '@1penny/commons';
+import { tickerOf } from '@1penny/commons';
+import { valuePlots } from '@1penny/core';
+import type { DockPageHandle, DockPageSpec, DockPanelId, WidgetPanel } from './types.js';
+import { createIcon } from './icons.js';
+import { widgetIndicatorLabel } from './indicatorInputWords.js';
+import { drawingTypeLabel } from './WidgetObjectTree.js';
+import { NARROW_WIDGET_PX } from './narrowMode.js';
+import { WidgetDock } from './WidgetDock.js';
+import { type DataWindowModel } from './WidgetDataWindow.js';
+import { readsChartPrices } from './WidgetLegendView.js';
+import { type WidgetFeature } from './widgetFeatures.js';
+import type { ChartWidget } from './ChartWidget.js';
+
+/** The switch each of the dock's panels, but the watchlist (an option), goes with. */
+const PANEL_FEATURES = {
+  alerts: 'alerts',
+  objectTree: 'objectTree',
+  dataWindow: 'dataWindow',
+  symbolInfo: 'symbolInfo',
+  depthLadder: 'depthLadder',
+} as const satisfies Record<Exclude<WidgetPanel, 'watchlist'>, WidgetFeature>;
+
+/** The built-in panels' ids, which a page of the host's can't take. */
+const BUILT_IN_PANELS: ReadonlySet<string> = new Set<WidgetPanel>(['watchlist', ...Object.keys(PANEL_FEATURES) as WidgetPanel[]]);
+
+/** The toolbar's button for a panel, where it has one. */
+const PANEL_TOOLBAR_ROLES: Partial<Record<WidgetPanel, string>> = { watchlist: 'watchlist', alerts: 'alerts', objectTree: 'objects', symbolInfo: 'symbolInfo', depthLadder: 'trade' };
+
+/** What the dock reads of the widget around it, and asks of it. */
+export interface DockHost {
+  readonly alerting: ChartWidget['alerting'];
+  readonly chart: ChartWidget['chart'];
+  readonly chartContainer: ChartWidget['chartContainer'];
+  readonly comparing: ChartWidget['comparing'];
+  readonly dataWindow: ChartWidget['dataWindow'];
+  readonly featureState: ChartWidget['featureState'];
+  formatAlertPrice: ChartWidget['formatAlertPrice'];
+  indicatorValueText: ChartWidget['indicatorValueText'];
+  readonly lastHoverBar: ChartWidget['lastHoverBar'];
+  readonly lastHoverIndex: ChartWidget['lastHoverIndex'];
+  readonly lastHoverPrevClose: ChartWidget['lastHoverPrevClose'];
+  readonly objectTree: ChartWidget['objectTree'];
+  refreshDrawingsState: ChartWidget['refreshDrawingsState'];
+  readonly root: ChartWidget['root'];
+  readonly settingsState: ChartWidget['chartSettings']['settingsState'];
+  readonly symbolInfoPanel: ChartWidget['symbolInfoPanel'];
+  readonly t: ChartWidget['t'];
+  readonly toolbar: ChartWidget['toolbar'];
+  markOpen: ChartWidget['markOpen'];
+  readonly trading: ChartWidget['trading'];
+  readonly watching: ChartWidget['watching'];
+}
+
+/**
+ * The dock by the chart: its panels (watchlist, alerts, objects, data window, symbol info and
+ * the trading ones), the rail of their buttons, its width as the widget's changes, the object
+ * tree's list and the data window's values at the bar under the pointer.
+ */
+export class WidgetDockArea {
+  /** The frame the data window is drawn again at, while one is asked for. */
+  private dataWindowFrame = 0;
+
+  constructor(private readonly host: DockHost) {}
+
+  /**
+   * Draw the open data window again at the next frame: the indicators'
+   * values changed under the pointer (a tick, or outputs from the worker).
+   */
+  scheduleDataWindow(): void {
+    if (this.dataWindowFrame || !this.host.dataWindow?.isOpen()) return;
+    this.dataWindowFrame = requestAnimationFrame(() => {
+      this.dataWindowFrame = 0;
+      if (this.host.dataWindow?.isOpen()) this.host.dataWindow.render(this.buildDataWindowModel());
+    });
+  }
+
+  /** The panels by the chart (watchlist, alerts, objects, data window, symbol info) and their rail. */
+  dock: WidgetDock | null = null;
+
+  /** Whether the widget was narrow when the dock last looked (null: not yet). */
+  private dockNarrow: boolean | null = null;
+
+  /** Follows the widget's width for the dock. */
+  dockObserver: ResizeObserver | null = null;
+
+  /** The pages the host added, by id. */
+  private readonly hostPages = new Set<string>();
+
+  /**
+   * Open a panel of the dock beside the chart (in a sheet on a phone), in
+   * place of the one open. False when the widget hasn't it: no watchlist, no
+   * depth ladder (the `depthLadder` option), its switch off, or no page of
+   * the host's by that id.
+   */
+  openPanel(panel: DockPanelId): boolean {
+    if (!this.hasPanel(panel) || !this.dock) return false;
+    this.dock.open(panel);
+    return this.dock.current() === panel;
+  }
+
+  /**
+   * Whether the widget has `panel`: the host's pages while they are there,
+   * the watchlist and the ladder only when made with them, every built-in one
+   * with its switch on.
+   */
+  private hasPanel(panel: DockPanelId): boolean {
+    if (this.hostPages.has(panel)) return true;
+    if (!BUILT_IN_PANELS.has(panel)) return false;
+    if (panel === 'watchlist') return this.host.watching.watchlist !== null;
+    if (panel === 'depthLadder' && this.host.trading.depthLadder === null) return false;
+    return this.host.featureState[PANEL_FEATURES[panel as Exclude<WidgetPanel, 'watchlist'>]];
+  }
+
+  /** Shut the dock. */
+  closePanel(): void {
+    this.dock?.close();
+  }
+
+  /** The panel open in the dock, or null. */
+  getOpenPanel(): DockPanelId | null {
+    return this.dock?.current() ?? null;
+  }
+
+  /**
+   * A page of the host's in the dock: its button on the rail after the
+   * built-in ones, and under the dock's header (its label and a close) its
+   * element. Null for an id a built-in panel or another page has.
+   */
+  addHostPage(spec: DockPageSpec): DockPageHandle | null {
+    const dock = this.dock;
+    if (!dock || BUILT_IN_PANELS.has(spec.id) || dock.has(spec.id)) return null;
+    const page = document.createElement('div');
+    page.className = 'pcw-dock-host-page';
+    page.dataset.page = spec.id;
+    page.setAttribute('role', 'region');
+    page.setAttribute('aria-label', spec.label);
+    const header = document.createElement('div');
+    header.className = 'pcw-dock-host-header';
+    const title = document.createElement('span');
+    title.textContent = spec.label;
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'pcw-dock-host-close';
+    close.setAttribute('aria-label', this.host.t('common.close'));
+    close.title = this.host.t('common.close');
+    close.innerHTML = createIcon('x', 14);
+    close.addEventListener('click', () => dock.closePage(spec.id));
+    header.append(title, close);
+    const body = document.createElement('div');
+    body.className = 'pcw-dock-host-body';
+    body.appendChild(spec.element);
+    page.append(header, body);
+    dock.addPage({ id: spec.id, label: spec.label, icon: spec.icon, element: page, onShow: spec.onShow, onHide: spec.onHide });
+    this.hostPages.add(spec.id);
+    this.syncRail();
+    let removed = false;
+    return {
+      remove: () => {
+        if (removed) return;
+        removed = true;
+        this.hostPages.delete(spec.id);
+        // The element is the host's again, out of the dock's page.
+        spec.element.remove();
+        // The widget destroyed: nothing left to shut or tidy.
+        if (!dock.has(spec.id)) return;
+        dock.removePage(spec.id);
+        this.syncRail();
+      },
+    };
+  }
+
+  /**
+   * The bar under the pointer and the close before it. On candles the data
+   * bar at the index, as it is now (a live tick moves it); on Renko and the
+   * like the brick the crosshair reported, whose index is not the data's.
+   */
+  private hoveredBar(): { bar: OHLCBar; prevClose: number } | null {
+    const idx = this.host.lastHoverIndex;
+    if (idx === null || idx < 0) return null;
+    if (!this.host.chart.isTimeAligned()) {
+      const bar = this.host.lastHoverBar;
+      return bar ? { bar, prevClose: this.host.lastHoverPrevClose ?? bar.open } : null;
+    }
+    const data = this.host.chart.getData();
+    if (idx >= data.length) return null;
+    return { bar: data[idx], prevClose: idx > 0 ? data[idx - 1].close : data[idx].open };
+  }
+
+  buildDataWindowModel(): DataWindowModel {
+    const idx = this.host.lastHoverIndex;
+    const hovered = this.hoveredBar();
+    if (idx === null || !hovered) {
+      return { ohlc: null, change: 0, changePct: 0, indicators: [] };
+    }
+    const { bar, prevClose } = hovered;
+    const change = bar.close - prevClose;
+    const changePct = prevClose !== 0 ? (change / prevClose) * 100 : 0;
+    const inOwnPane = new Set(this.host.chart.getIndicatorPanes().flatMap((pane) => pane.instanceIds ?? [pane.instanceId]));
+    const locale = this.host.settingsState.numberLocale || 'en-US';
+
+    const indicators = this.host.chart.getActiveIndicators().map((ind) => {
+      // The values drawn: a recompute in the indicator worker is not finished here on each move.
+      const series = this.host.chart.getIndicatorOutput(ind.instanceId, { drawn: true })?.series;
+      const point = series?.[idx] ?? null;
+      const inPriceUnits = !inOwnPane.has(ind.instanceId) && readsChartPrices(ind);
+      // The drawn lines by their titles ("Signal"), else every field by its key.
+      const fields = (ind.descriptor.plots ? valuePlots(ind.descriptor.plots) : undefined)?.map((p) => [p.key, p.title] as const)
+        ?? Object.keys(point ?? {}).map((k) => [k, k] as const);
+      const values = point
+        ? fields
+            .filter(([key]) => typeof point[key] === 'number' && Number.isFinite(point[key]))
+            .map(([key, title]) => {
+              const value = point[key] as number;
+              return { key: title, value, text: this.host.indicatorValueText(value, inPriceUnits, locale) };
+            })
+        : [];
+      return { name: ind.descriptor.name, values };
+    }).filter((i) => i.values.length > 0);
+
+    return {
+      ohlc: { open: bar.open, high: bar.high, low: bar.low, close: bar.close, volume: bar.volume },
+      change,
+      // In the decimals the bar's prices show: a change of 18.7494 on 100,000 reads 18.75.
+      changeText: this.host.formatAlertPrice(change, bar.close),
+      changePct,
+      indicators,
+    };
+  }
+
+  toggleDataWindow(): void {
+    if (!this.host.dataWindow || !this.host.featureState.dataWindow) return;
+    this.dock?.toggle('dataWindow');
+  }
+
+  toggleWatchlist(): void {
+    if (!this.host.watching.watchlist) return;
+    this.dock?.toggle('watchlist');
+  }
+
+  toggleObjects(): void {
+    if (!this.host.objectTree || !this.host.featureState.objectTree) return;
+    this.dock?.toggle('objectTree');
+  }
+
+  /**
+   * The dock's pages, in the rail's order: the watchlist, alerts, objects,
+   * the data window, the symbol info and the depth ladder, all shut to start
+   * with. Each draws itself as it shows, and says so on the toolbar's button.
+   */
+  setupDock(): void {
+    const dock = this.dock;
+    if (!dock) return;
+    if (this.host.watching.watchlist) {
+      const list = this.host.watching.watchlist;
+      // Hidden, its sparklines were drawn at no size: drawn again as it shows.
+      dock.addPage({
+        id: 'watchlist', label: this.host.t('watchlist.title'), icon: 'list', element: list.element, parts: ['dock.watchlist'],
+        onShow: () => {
+          list.redraw();
+          this.host.markOpen('watchlist', true);
+        },
+        onHide: () => this.host.markOpen('watchlist', false),
+      });
+    }
+    const alerts = this.host.alerting.alertsPanel;
+    if (alerts) {
+      dock.addPage({
+        id: 'alerts', label: this.host.t('alerts.title'), icon: 'bell', element: alerts.element, parts: ['dock.alerts', 'alerts'],
+        onShow: () => {
+          alerts.openPanel();
+          this.host.alerting.refreshAlerts();
+          this.host.markOpen('alerts', true);
+        },
+        onHide: () => {
+          alerts.close();
+          this.host.markOpen('alerts', false);
+        },
+      });
+    }
+    const tree = this.host.objectTree;
+    if (tree) {
+      dock.addPage({
+        id: 'objectTree', label: this.host.t('objects.title'), icon: 'layers', element: tree.element, parts: ['dock.objectTree', 'objectTree'],
+        onShow: () => {
+          tree.openPanel();
+          this.refreshObjects();
+          this.host.markOpen('objects', true);
+        },
+        onHide: () => {
+          tree.close();
+          this.host.markOpen('objects', false);
+        },
+      });
+    }
+    const data = this.host.dataWindow;
+    if (data) {
+      dock.addPage({
+        id: 'dataWindow', label: this.host.t('dataWindow.title'), icon: 'table', element: data.element, parts: ['dock.dataWindow', 'dataWindow'],
+        onShow: () => {
+          data.openPanel();
+          data.render(this.buildDataWindowModel());
+        },
+        onHide: () => data.close(),
+      });
+    }
+    const info = this.host.symbolInfoPanel;
+    if (info) {
+      dock.addPage({
+        id: 'symbolInfo', label: this.host.t('symbolInfo.title'), icon: 'info', element: info.element, parts: ['dock.symbolInfo', 'symbolInfo'],
+        onShow: () => info.open(),
+        onHide: () => info.close(),
+      });
+    }
+    const ladder = this.host.trading.depthLadder;
+    if (ladder) {
+      dock.addPage({
+        id: 'depthLadder', label: this.host.t('ladder.title'), icon: 'ladder', element: ladder.element, parts: ['dock.depthLadder', 'depthLadder'],
+        onShow: () => ladder.openPanel(),
+        onHide: () => ladder.close(),
+      });
+    }
+    this.syncRail();
+    this.fitDockToWidth();
+    if (typeof ResizeObserver !== 'undefined') {
+      this.dockObserver = new ResizeObserver(() => this.fitDockToWidth());
+      this.dockObserver.observe(this.host.root);
+    }
+  }
+
+  /**
+   * The dock and the widget's width. Going narrow (a phone, a rotated
+   * tablet) shuts any panel: it would be a sheet over the chart. No panel
+   * opens by itself: the chart has the room until one is asked for.
+   */
+  private fitDockToWidth(): void {
+    const dock = this.dock;
+    const width = this.host.root.clientWidth;
+    if (!dock || width === 0) return;
+    const narrow = width < NARROW_WIDGET_PX;
+    const was = this.dockNarrow;
+    this.dockNarrow = narrow;
+    if (narrow && was !== true) dock.close();
+  }
+
+  /** Whether the rail shows now: on, and the widget not narrow. */
+  railShown(): boolean {
+    return this.host.featureState.dock && !this.host.root.hasAttribute('data-pcw-narrow');
+  }
+
+  /**
+   * The rail's Tab stop on a button that shows, and the toolbar's alerts and
+   * objects buttons hidden while the rail has its own for them (so the
+   * "more" menu leaves them out too).
+   */
+  syncRail(): void {
+    this.dock?.syncRail();
+    const rail = this.railShown();
+    this.host.toolbar?.setRailed('watchlist', rail && this.host.featureState['dock.watchlist']);
+    this.host.toolbar?.setRailed('alerts', rail && this.host.featureState['dock.alerts']);
+    this.host.toolbar?.setRailed('objects', rail && this.host.featureState['dock.objectTree']);
+    this.host.toolbar?.fit();
+  }
+
+  /** Where the keyboard goes when a panel shuts and the rail can't take it: its toolbar button, or "more" on a phone. */
+  panelFocusTarget(page: DockPanelId): HTMLElement | null {
+    const role = PANEL_TOOLBAR_ROLES[page as WidgetPanel];
+    const own = role ? this.host.root.querySelector<HTMLElement>(`.pcw-toolbar [data-role="${role}"]`) : null;
+    const narrow = this.host.root.hasAttribute('data-pcw-narrow');
+    if (own && !own.hidden && !(narrow && own.classList.contains('pcw-toolbar-overflow'))) return own;
+    return this.host.root.querySelector<HTMLElement>('.pcw-toolbar-more') ?? this.host.chartContainer;
+  }
+
+  /** A panel shut by its own close button: by hand. */
+  closePanelByHand(page: WidgetPanel): void {
+    this.dock?.closePage(page);
+  }
+
+  refreshObjects(): void {
+    this.host.refreshDrawingsState();
+    if (!this.host.objectTree) return;
+    // Named as the chips and the legend name them: a compare by its symbol, two EMAs by their periods;
+    // the full name in the tooltip.
+    const indicators = this.host.chart.getActiveIndicators().map((i) => ({
+      instanceId: i.instanceId,
+      name: widgetIndicatorLabel(i, this.host.t),
+      title: i.descriptor.name,
+      visible: i.visible,
+    }));
+    const drawings = this.host.chart.getDrawings().map((d) => ({
+      id: d.id,
+      label: d.name || drawingTypeLabel(d.type, this.host.t),
+      visible: d.visible,
+      offInterval: d.visible && !this.host.chart.isDrawingShown(d.id),
+      locked: d.locked,
+      group: d.group,
+    }));
+    // Every compare, as the compare dialog lists it: the percent lines and the indicators on another symbol.
+    const compares = this.host.comparing.comparedNow().map((c) => ({ id: c.id, label: tickerOf(c.symbol), color: c.color, way: c.way }));
+    this.host.objectTree.setObjects(indicators, drawings, compares);
+  }
+}

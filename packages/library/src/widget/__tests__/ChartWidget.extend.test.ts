@@ -1,0 +1,1510 @@
+// @vitest-environment jsdom
+import { describe, beforeAll, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { preloadDialogs } from '../widgetDialogs.js';
+import { SANS_FONT_FAMILY, type ChartOptions } from '@1penny/commons';
+import { withResampling, type ResamplingAdapter } from '@1penny/core';
+import { decodeWidgetState } from '../widgetShareState.js';
+import { layoutToolbar } from './toolbarLayout.js';
+import { timeframeLabel } from '../widgetTimeframes.js';
+
+/** Stand-in for the canvas-backed Chart: emits the menus' events on demand. */
+class FakeChart {
+  static last: FakeChart;
+  alerts: number[] = [];
+  private listeners = new Map<string, ((e: { payload: unknown }) => void)[]>();
+
+  constructor(_host: HTMLElement, public options: ChartOptions) {
+    FakeChart.last = this;
+    // As the chart does: it starts with the type settings its options give, and the widget reads them back.
+    this.chartTypeOptions = options.chartTypeOptions ?? {};
+    return new Proxy(this, {
+      get: (target, key, receiver) =>
+        key in target ? Reflect.get(target, key, receiver) : () => undefined,
+    });
+  }
+
+  on(event: string, cb: (e: { payload: unknown }) => void): void {
+    this.listeners.set(event, [...(this.listeners.get(event) ?? []), cb]);
+  }
+  emit(event: string, payload: unknown = {}): void {
+    for (const cb of this.listeners.get(event) ?? []) cb({ payload });
+  }
+  addAlert(price: number): void { this.alerts.push(price); }
+  features: Record<string, boolean> = {};
+  getFeatures(): Record<string, boolean> { return this.features; }
+  scaleMode = 'regular';
+  scaleModes: string[] = [];
+  getScaleMode(): string { return this.scaleMode; }
+  setScaleMode(mode: string): void { this.scaleMode = mode; this.scaleModes.push(mode); }
+  undos: { undo(): void; redo(): void }[] = [];
+  recordUndo(step: { undo(): void; redo(): void }): void { this.undos.push(step); }
+  tools: (string | null)[] = [];
+  setDrawingTool(tool: string | null): void { this.tools.push(tool); }
+  setups: unknown[][] = [];
+  applyIndicatorSetup(list: unknown[]): void { this.setups.push(list); }
+  getIndicatorSetup(): unknown[] { return [{ id: 'rsi', instanceId: 'tc_rsi_1', params: { period: 14 } }]; }
+  getActiveIndicators(): unknown[] { return this.indicatorsShown; }
+  indicatorsShown: unknown[] = [];
+  roundPrice(p: number): number { return Math.round(p); }
+  added: [string, Record<string, unknown>, string?, Record<string, unknown>?][] = [];
+  addIndicator(id: string, params: Record<string, unknown>, position?: string, options?: Record<string, unknown>): string {
+    this.added.push([id, params, position, options]);
+    return `tc_${id}_${this.added.length}`;
+  }
+  removedIndicators: string[] = [];
+  removeIndicator(id: string): void { this.removedIndicators.push(id); }
+  moved: [string, string][] = [];
+  moveIndicatorToPane(id: string, target: string): boolean { this.moved.push([id, target]); return true; }
+  overlays: string[] = [];
+  overlayBars = new Map<string, unknown>();
+  addCompareSymbol(id: string, _label?: string, bars?: unknown): void { this.overlays.push(id); this.overlayBars.set(id, bars); }
+  removeCompareSymbol(id: string): void { this.overlays = this.overlays.filter((o) => o !== id); }
+  compareData: [string, unknown][] = [];
+  updateCompareData(id: string, bars: unknown): void { this.compareData.push([id, bars]); }
+  series = new Map<string, unknown>();
+  setSymbolSeries(symbol: string, bars: unknown): void { this.series.set(symbol, bars); }
+  getSymbolSeries(symbol: string): unknown { return this.series.get(symbol) ?? null; }
+  shapes: unknown[] = [];
+  setShapes(shapes: unknown): void { this.shapes.push(shapes); }
+  barLayouts: unknown[] = [];
+  setBarLayout(layout: unknown): void { this.barLayouts.push(layout); }
+  densities: unknown[] = [];
+  setDensity(density: unknown): void { this.densities.push(density); }
+  fonts: unknown[] = [];
+  setFont(font: unknown): void { this.fonts.push(font); }
+  chartTypeOptions: unknown = {};
+  getChartTypeOptions(): unknown { return this.chartTypeOptions; }
+  required: string[] = [];
+  getRequiredSymbols(): string[] { return this.required; }
+  replays: Record<string, unknown>[] = [];
+  replayStart(config: Record<string, unknown>): void { this.replays.push(config); this.replaying = true; }
+  replaying = false;
+  isReplayActive(): boolean { return this.replaying; }
+  getReplayProgress() { return { current: 0, total: 10, percent: 0 }; }
+  replayState = 'paused';
+  getReplayState(): string { return this.replayState; }
+  replayBarIndex = 0;
+  getReplayBarIndex(): number { return this.replayBarIndex; }
+  resumed = 0;
+  replayResume(): void { this.resumed++; this.replayState = 'playing'; }
+  barsLoaded: { time: number; close: number }[] = [];
+  setData(bars: { time: number; close: number }[]): void { this.barsLoaded = bars; }
+  timeframes: string[] = [];
+  getData(): { close: number; time: number }[] { return this.barsLoaded.length ? this.barsLoaded : [{ close: 100, time: 0 }]; }
+  getDrawings(): unknown[] { return []; }
+  getIndicatorPanes(): unknown[] { return []; }
+  getPlotRect() { return { x: 0, y: 0, width: 600, height: 300 }; }
+  getLegendBottom(): number { return 40; }
+  /** False on Renko and the like, which draw no compare lines. */
+  timeAligned = true;
+  isTimeAligned(): boolean { return this.timeAligned; }
+  isTimeframeAllowed(): boolean { return true; }
+  isAutoScale(): boolean { return true; }
+  isInvertScale(): boolean { return false; }
+  getOrders(): unknown[] { return []; }
+  getPositions(): unknown[] { return []; }
+  getFills(): unknown[] { return []; }
+  getIndicatorOutput(): null { return null; }
+  formatPrice(v: number): string { return v.toFixed(2); }
+}
+
+vi.mock('../../Chart.js', () => ({ Chart: FakeChart }));
+
+const { ChartWidget } = await import('../ChartWidget.js');
+const { WidgetContextMenu } = await import('../WidgetContextMenu.js');
+const { WidgetToolbar } = await import('../WidgetToolbar.js');
+
+let host: HTMLDivElement;
+let widget: InstanceType<typeof ChartWidget>;
+
+beforeEach(() => {
+  localStorage.clear();
+  host = document.createElement('div');
+  document.body.appendChild(host);
+});
+
+afterEach(() => {
+  widget.destroy();
+  host.remove();
+});
+
+const menuItems = () => [...host.querySelectorAll<HTMLElement>('.pcw-context-menu [role^=menuitem]')];
+
+// The dialogs load their code when first opened; here it is in up front, so each opens at once.
+beforeAll(preloadDialogs);
+
+describe('ChartWidget toolbar buttons of the host', () => {
+  it('adds a button that calls back, switches and goes away', () => {
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false });
+    const clicks: HTMLButtonElement[] = [];
+    const handle = widget.addToolbarButton({ id: 'news', label: 'News', icon: 'bell', toggle: true, onClick: (b) => clicks.push(b) })!;
+    const btn = host.querySelector<HTMLButtonElement>('[data-host-button="news"]')!;
+    expect(btn).toBe(handle.element);
+    expect(btn.getAttribute('aria-label')).toBe('News');
+    expect(btn.querySelector('svg')).not.toBeNull();
+    btn.click();
+    expect(clicks).toEqual([btn]);
+    handle.setActive(true);
+    expect(btn.getAttribute('aria-pressed')).toBe('true');
+    handle.setText('3');
+    expect(btn.textContent).toBe('3');
+    expect(btn.getAttribute('aria-label')).toBe('News: 3');
+    handle.remove();
+    expect(host.querySelector('[data-host-button="news"]')).toBeNull();
+  });
+
+  it('puts a text button on the left with the chart controls', () => {
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false });
+    widget.addToolbarButton({ id: 'scan', label: 'Scanner', side: 'left', onClick: () => {} });
+    const btn = host.querySelector<HTMLButtonElement>('[data-host-button="scan"]')!;
+    expect(btn.textContent).toBe('Scanner');
+    expect(btn.hasAttribute('aria-label')).toBe(false); // its text names it
+    // Before the spacer that pushes the panel buttons right.
+    const spacer = host.querySelector('.pcw-toolbar-spacer')!;
+    expect(btn.compareDocumentPosition(spacer) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('keeps a button on a toolbar switched off, to show with it', () => {
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false, toolbar: false });
+    const handle = widget.addToolbarButton({ id: 'x', label: 'X', onClick: () => {} })!;
+    const toolbar = handle.element.closest<HTMLElement>('.pcw-toolbar')!;
+    expect(getComputedStyle(toolbar).display).toBe('none');
+    widget.setFeatures({ toolbar: true });
+    expect(getComputedStyle(toolbar).display).not.toBe('none');
+  });
+});
+
+describe('ChartWidget toolbar parts of the host with no room', () => {
+  const root = () => host.querySelector<HTMLElement>('.pcw-root')!;
+  const toolbarEl = () => host.querySelector<HTMLElement>('.pcw-toolbar')!;
+  const more = () => host.querySelector<HTMLButtonElement>('.pcw-toolbar-more')!;
+  const pickFromMore = (label: string) => {
+    more().click();
+    menuItems().find((b) => b.textContent?.trim() === label)!.click();
+  };
+  /** Where "more" sits; jsdom puts everything else at 0, 0. */
+  const placeMore = () => {
+    more().getBoundingClientRect = () => ({ left: 500, right: 528, top: 10, bottom: 40, width: 28, height: 30, x: 500, y: 10, toJSON: () => ({}) }) as DOMRect;
+  };
+  const nextFrame = () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+  /** The fits a new widget asks for, a frame after its first, all done. */
+  const settled = async () => {
+    for (let i = 0; i < 3; i++) await nextFrame();
+  };
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it('puts a left button under “more” on a narrow widget, where a pick still calls back', () => {
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false });
+    const clicks: HTMLButtonElement[] = [];
+    const handle = widget.addToolbarButton({ id: 'scan', label: 'Scanner', side: 'left', onClick: (b) => clicks.push(b) })!;
+    root().setAttribute('data-pcw-narrow', '');
+    expect(handle.element.classList.contains('pcw-toolbar-overflow')).toBe(true);
+    pickFromMore('Scanner');
+    expect(clicks).toEqual([handle.element]);
+  });
+
+  it('opens a menu of the host picked from “more” on a narrow widget under “more”, not at the corner', () => {
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false });
+    const open = vi.spyOn(WidgetContextMenu.prototype, 'open');
+    widget.addToolbarDropdown({ id: 'scans', label: 'Scans', side: 'left', items: () => [{ label: 'A', onSelect: () => {} }] });
+    root().setAttribute('data-pcw-narrow', '');
+    placeMore();
+    pickFromMore('Scans');
+    const [, x, y, , anchor, , xBack] = open.mock.calls.at(-1)!;
+    expect([x, y]).toEqual([500, 42]);
+    expect(anchor).toBe(more());
+    // Without room past "more", its end lines up with "more"'s, as the More menu's does.
+    expect(xBack).toBe(528);
+  });
+
+  it('opens it under “more” too while its button is folded to fit a wide widget', () => {
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false });
+    const open = vi.spyOn(WidgetContextMenu.prototype, 'open');
+    const handle = widget.addToolbarDropdown({ id: 'scans', label: 'Scans', side: 'right', items: () => [{ label: 'A', onSelect: () => {} }] })!;
+    // All at once: a fit waiting for its frame would unfold it.
+    root().removeAttribute('data-pcw-narrow');
+    toolbarEl().classList.add('pcw-toolbar--collapsed');
+    handle.element.setAttribute('data-pcw-folded', '');
+    placeMore();
+    pickFromMore('Scans');
+    const [, x, y] = open.mock.calls.at(-1)!;
+    expect([x, y]).toEqual([500, 42]);
+  });
+
+  it.each([
+    ['left to right', 'ltr', (left: number) => left, 340],
+    ['right to left', 'rtl', (left: number) => left + 180, 400],
+  ] as const)('lines a menu of the host up under its button, %s, as the toolbar’s own menus', (_how, dir, startEdge, expected) => {
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false, dir });
+    const handle = widget.addToolbarDropdown({ id: 'scans', label: 'Scans', side: 'right', items: () => [{ label: 'A', onSelect: () => {} }] })!;
+    // Clicked on its button, which shows: a wide widget.
+    root().removeAttribute('data-pcw-narrow');
+    Object.defineProperty(root(), 'clientWidth', { configurable: true, value: 1000 });
+    Object.defineProperty(root(), 'clientHeight', { configurable: true, value: 600 });
+    vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockImplementation(function (this: HTMLElement) {
+      return this.classList.contains('pcw-context-menu') ? 180 : 0;
+    });
+    handle.element.getBoundingClientRect = () => ({ left: 340, right: 400, top: 0, bottom: 36, width: 60, height: 36, x: 340, y: 0, toJSON: () => ({}) }) as DOMRect;
+    handle.element.click();
+    const menu = [...host.querySelectorAll<HTMLElement>('.pcw-context-menu')].find((m) => !m.hidden)!;
+    // Its start edge on the button's: the left, or right to left the right.
+    expect(startEdge(parseFloat(menu.style.left))).toBe(expected);
+  });
+
+  /** The menus showing now, by name. */
+  const openMenus = () => [...host.querySelectorAll<HTMLElement>('.pcw-context-menu')]
+    .filter((menu) => !menu.hidden)
+    .map((menu) => menu.getAttribute('aria-label'));
+
+  it.each([
+    ['a menu of the host', 'Scans'],
+    ['the Trade menu', 'Trade'],
+  ])('closes %s picked from “more” when “more” is pressed again, so two menus are never open', (_what, label) => {
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false });
+    widget.addToolbarDropdown({ id: 'scans', label: 'Scans', side: 'left', items: () => [{ label: 'Gap up', onSelect: () => {} }] });
+    root().setAttribute('data-pcw-narrow', '');
+    pickFromMore(label);
+    expect(openMenus()).toEqual([label]);
+    expect(more().getAttribute('aria-expanded')).toBe('true');
+    more().click();
+    expect(openMenus()).toEqual([]);
+    expect(more().getAttribute('aria-expanded')).toBe('false');
+    more().click();
+    expect(openMenus()).toEqual(['More']);
+  });
+
+  /** The size watchers made, each with what it watches: the browser calls one back when a box it watches is resized. */
+  const watchSizes = () => {
+    const observers: { callback: () => void; watched: Element[] }[] = [];
+    vi.stubGlobal('ResizeObserver', class {
+      watched: Element[] = [];
+      constructor(public callback: () => void) { observers.push(this); }
+      observe(el: Element) { this.watched.push(el); }
+      unobserve() {}
+      disconnect() {}
+    });
+    /** As the browser does when `el` changes size. */
+    return (el: Element) => observers.filter((o) => o.watched.includes(el)).forEach((o) => o.callback());
+  };
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  it.each(['button', 'menu'] as const)('leaves the toolbar unfitted when the text of its %s changes and the button keeps its width', async (kind) => {
+    watchSizes();
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false });
+    const handle = kind === 'button'
+      ? widget.addToolbarButton({ id: 'news', label: 'News', icon: 'bell', text: '3', onClick: () => {} })!
+      : widget.addToolbarDropdown({ id: 'news', label: 'News', icon: 'bell', text: '3', items: () => [] })!;
+    await settled();
+    const fit = vi.spyOn(WidgetToolbar.prototype, 'fit');
+    // A live count, set every frame: its figures are all as wide.
+    for (const count of ['3', '4', '5', '6']) {
+      handle.setText(count);
+      await nextFrame();
+    }
+    expect(fit).not.toHaveBeenCalled();
+  });
+
+  it.each(['button', 'menu'] as const)('refits the toolbar when the text of its %s grows, folding from the right', async (kind) => {
+    const resized = watchSizes();
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false });
+    const handle = kind === 'button'
+      ? widget.addToolbarButton({ id: 'news', label: 'News', icon: 'bell', text: '3', side: 'left', onClick: () => {} })!
+      : widget.addToolbarDropdown({ id: 'news', label: 'News', icon: 'bell', text: '3', side: 'left', items: () => [] })!;
+    const el = toolbarEl();
+    // 400px for the chart's controls, 40 for each button that can fold still shown, 10 for each letter of the count.
+    const shown = () => [...el.querySelectorAll('.pcw-toolbar-overflow')].filter((b) => !b.hasAttribute('data-pcw-folded')).length;
+    const need = () => 400 + 40 * shown() + 10 * (handle.element.textContent?.length ?? 0);
+    layoutToolbar(el, need(), need);
+    await settled();
+    expect(el.classList.contains('pcw-toolbar--collapsed')).toBe(false);
+    handle.setText('12 unread');
+    // The button widens its group, not the toolbar.
+    resized(handle.element.parentElement!);
+    await nextFrame();
+    expect(el.classList.contains('pcw-toolbar--collapsed')).toBe(true);
+    expect(handle.element.hasAttribute('data-pcw-folded')).toBe(false); // on the left, it folds last
+  });
+});
+
+describe('ChartWidget menu entries of the host', () => {
+  it('adds the host’s entries after the widget’s, with where the menu opened', () => {
+    const seen: unknown[] = [];
+    const picked: string[] = [];
+    widget = new ChartWidget(host, {
+      symbol: 'AAA',
+      watchlist: false,
+      chartMenuItems: (context) => {
+        seen.push(context);
+        return [{ label: 'Copy price', icon: 'check', onSelect: () => picked.push('copy') }];
+      },
+    });
+    FakeChart.last.emit('chartContextMenu', { area: 'plot', x: 10, y: 10, price: 95, time: 1000 });
+    expect(seen).toEqual([{ area: 'plot', price: 95, time: 1000 }]);
+    const labels = menuItems().map((b) => b.textContent);
+    expect(labels[labels.length - 1]).toBe('Copy price');
+    expect(labels.length).toBeGreaterThan(1);
+    menuItems()[labels.length - 1].click();
+    expect(picked).toEqual(['copy']);
+
+    // The widget's own entries still work.
+    FakeChart.last.emit('priceAxisAdd', { price: 90, x: 0, y: 0 });
+    expect(seen[1]).toEqual({ area: 'priceAxisAdd', price: 90 });
+    menuItems().find((b) => b.textContent?.startsWith('Add alert'))!.click();
+    expect(FakeChart.last.alerts).toEqual([90]);
+  });
+
+  it('opens a menu of only the host’s entries where the widget has none', () => {
+    widget = new ChartWidget(host, {
+      symbol: 'AAA',
+      watchlist: false,
+      alerts: false,
+      trading: false,
+      drawingTools: false,
+      chartMenuItems: () => [{ label: 'Mine', onSelect: () => {} }],
+    });
+    FakeChart.last.emit('priceAxisAdd', { price: 90, x: 0, y: 0 });
+    expect(menuItems().map((b) => b.textContent)).toEqual(['Mine']);
+  });
+});
+
+describe('ChartWidget keys for tools and intervals', () => {
+  const press = () => host.querySelector('.pcw-root')!.dispatchEvent(new Event('pointerdown'));
+
+  it('picks a drawing tool with Alt and a letter', () => {
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false });
+    press();
+    document.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyT', key: 't', altKey: true, cancelable: true }));
+    expect(FakeChart.last.tools).toEqual(['trendLine']);
+  });
+
+  it('leaves the keys to a dialog that has focus', () => {
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false });
+    press();
+    const dialog = document.createElement('div');
+    dialog.setAttribute('role', 'dialog');
+    const button = document.createElement('button');
+    dialog.appendChild(button);
+    host.querySelector('.pcw-root')!.appendChild(dialog);
+    button.focus();
+    document.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyT', key: 't', altKey: true, cancelable: true }));
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: '5', cancelable: true }));
+    expect(FakeChart.last.tools).toEqual([]);
+    expect(host.querySelector<HTMLElement>('.pcw-interval-input')!.hidden).toBe(true);
+  });
+
+  it('opens the interval field on a digit once the chart was used, and switches on Enter', () => {
+    const changes: string[] = [];
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false, onTimeframeChange: (tf) => changes.push(tf) });
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: '4', cancelable: true }));
+    expect(host.querySelector<HTMLElement>('.pcw-interval-input')!.hidden).toBe(true); // not used yet
+    press();
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: '4', cancelable: true }));
+    const field = host.querySelector<HTMLInputElement>('.pcw-interval-field')!;
+    expect(field.value).toBe('4');
+    field.value = '4h';
+    field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    expect(changes).toEqual(['4h']);
+  });
+});
+
+describe('ChartWidget indicator templates', () => {
+  beforeEach(() => localStorage.clear());
+
+  /** The indicators dialog, on its Templates tab. */
+  const openTemplates = () => {
+    if (!document.querySelector('.pcw-ip')) host.querySelector<HTMLButtonElement>('[data-role="indicators"]')!.click();
+    document.querySelector<HTMLButtonElement>('.pcw-ip-tab[data-view="templates"]')!.click();
+  };
+
+  it('saves the chart’s indicators under a name and applies them', () => {
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false });
+    FakeChart.last.indicatorsShown = [{ id: 'rsi', instanceId: 'tc_rsi_1', params: {}, visible: true, descriptor: { defaultConfig: {} } }];
+    openTemplates();
+    document.querySelector<HTMLButtonElement>('[data-tpl-save]')!.click();
+    // The open prompt (the layouts have one of their own).
+    const prompt = [...host.querySelectorAll<HTMLFormElement>('.pcw-name-prompt')].find((f) => !f.closest('.pcw-modal-backdrop')!.hasAttribute('hidden'))!;
+    const input = prompt.querySelector('input')!;
+    input.value = 'Momentum';
+    input.dispatchEvent(new Event('input'));
+    prompt.dispatchEvent(new Event('submit', { cancelable: true }));
+    return Promise.resolve().then(() => {
+      openTemplates();
+      const apply = document.querySelector<HTMLButtonElement>('[data-tpl-apply="Momentum"]')!;
+      expect(apply).not.toBeNull();
+      apply.click();
+      expect(FakeChart.last.setups).toEqual([[{ id: 'rsi', instanceId: 'tc_rsi_1', params: { period: 14 } }]]);
+    });
+  });
+
+  it('says there is nothing to save without indicators', () => {
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false });
+    openTemplates();
+    document.querySelector<HTMLButtonElement>('[data-tpl-save]')!.click();
+    const open = [...host.querySelectorAll('.pcw-name-prompt')].filter((f) => !f.closest('.pcw-modal-backdrop')!.hasAttribute('hidden'));
+    expect(open).toEqual([]);
+  });
+});
+
+describe('ChartWidget prices on the market grid', () => {
+  it('rounds the price a menu offers', () => {
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false });
+    FakeChart.last.emit('priceAxisAdd', { price: 90.4, x: 0, y: 0 });
+    menuItems().find((b) => b.textContent?.startsWith('Add alert'))!.click();
+    expect(FakeChart.last.alerts).toEqual([90]);
+  });
+});
+
+describe('ChartWidget replay in finer steps', () => {
+  it('offers the finer intervals the loaded bars have, and replays through them', async () => {
+    const MIN15 = 15 * 60_000;
+    const bars = Array.from({ length: 64 }, (_, i) => ({ time: i * MIN15, open: 100, high: 101, low: 99, close: 100, volume: 1 }));
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false, timeframe: '1h' });
+    widget.setData(bars as never);
+    await new Promise((r) => setTimeout(r, 0));
+    widget.toggleReplay();
+    const select = host.querySelector<HTMLSelectElement>('.pcw-replay-step')!;
+    expect([...select.options].map((o) => o.value)).toEqual(['auto', 'bar', '15m', '30m']);
+    select.value = '15m';
+    select.dispatchEvent(new Event('change'));
+    host.querySelector<HTMLButtonElement>('[data-act="random"]')!.click();
+    await new Promise((r) => setTimeout(r, 0));
+    const config = FakeChart.last.replays.at(-1)!;
+    expect((config.steps as unknown[]).length).toBe(64);
+  });
+
+  it('switches steps mid-replay from the bar before the forming one, still playing', async () => {
+    const MIN15 = 15 * 60_000;
+    const bars = Array.from({ length: 64 }, (_, i) => ({ time: i * MIN15, open: 100, high: 101, low: 99, close: 100, volume: 1 }));
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false, timeframe: '1h', replayStep: 'bar' });
+    widget.setData(bars as never);
+    await new Promise((r) => setTimeout(r, 0));
+    widget.replayFrom(8, true);
+    const fake = FakeChart.last;
+    fake.replayBarIndex = 10;
+    const resumed = fake.resumed;
+    const select = host.querySelector<HTMLSelectElement>('.pcw-replay-step')!;
+    select.value = '15m';
+    select.dispatchEvent(new Event('change'));
+    select.value = '30m'; // a second choice before the first one's steps are in
+    select.dispatchEvent(new Event('change'));
+    await new Promise((r) => setTimeout(r, 0));
+    const restarts = fake.replays.slice(1);
+    expect(restarts).toHaveLength(1);
+    // By time, so bars that land while its steps load don't move it.
+    expect(restarts[0]).toMatchObject({ startTime: fake.getData()[9].time });
+    expect((restarts[0].steps as unknown[]).length).toBe(32);
+    expect(fake.resumed).toBe(resumed + 1);
+  });
+
+  it('fetches the steps again once the feed’s wrapper builds the symbol’s days in its zone', async () => {
+    const HOUR = 3_600_000;
+    const hours = Array.from({ length: 72 }, (_, i) => ({ time: Date.UTC(2026, 9, 20) + i * HOUR, open: 1, high: 1, low: 1, close: 1, volume: 1 }));
+    let answers = false;
+    // A feed of 1h bars whose first answer about the symbol fails: its wrapper builds 4h steps on UTC's grid until a fresh load.
+    const feed = {
+      name: 'hours',
+      supportedTimeframes: ['1h'],
+      connect: () => {},
+      disconnect: () => {},
+      getConnectionState: () => 'connected',
+      fetchHistory: async () => hours,
+      resolveSymbol: async (symbol: string) => {
+        if (!answers) throw new Error('down');
+        return { symbol, timeZone: 'Asia/Ho_Chi_Minh' };
+      },
+      on: () => {},
+      off: () => {},
+      dispose: () => {},
+    };
+    // Steps of their own (no forming): the widget fetches them.
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false, adapter: feed as never, timeframe: '1d', replayStep: 'bar', replayAnimate: false });
+    const fake = FakeChart.last;
+    fake.setData([20, 21, 22].map((d) => ({ time: Date.UTC(2026, 9, d), close: 1 })));
+    const stepHours = () => (fake.replays.at(-1)!.steps as { time: number }[]).map((b) => new Date(b.time).getUTCHours() % 4);
+    widget.replayFrom(0);
+    const select = host.querySelector<HTMLSelectElement>('.pcw-replay-step')!;
+    select.value = '4h';
+    select.dispatchEvent(new Event('change'));
+    await vi.waitFor(() => expect(fake.replays).toHaveLength(2));
+    expect(new Set(stepHours())).toEqual(new Set([0]));
+
+    // The chart loads the symbol afresh, as its stream does: its days are built in Ho Chi Minh City now.
+    answers = true;
+    const wrapper = withResampling(feed as never) as ResamplingAdapter;
+    wrapper.renewZone('AAA');
+    await wrapper.fetchHistory('AAA', '1d', 3);
+    widget.replayFrom(0);
+    await vi.waitFor(() => expect(fake.replays).toHaveLength(3));
+    // 4h steps from midnight there: 01:00, 05:00… UTC.
+    expect(new Set(stepHours())).toEqual(new Set([1]));
+  });
+});
+
+describe('ChartWidget signal marker note', () => {
+  it('shows what a marker is while the pointer is on it', () => {
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false });
+    const marker = { id: 'm1', time: Date.UTC(2026, 0, 1), price: 101, direction: 'long', confidence: 0.82, source: 'momentum', label: 'EMA cross' };
+    FakeChart.last.emit('signalMarkerHover', { marker, x: 40, y: 80 });
+    const tip = host.querySelector<HTMLElement>('.pcw-marker-tip')!;
+    expect(tip.hidden).toBe(false);
+    expect(tip.textContent).toContain('EMA cross · momentum');
+    expect(tip.textContent).toContain('Long · 101.00 · confidence 82%');
+    FakeChart.last.emit('signalMarkerHover', { marker: null, x: 0, y: 0 });
+    expect(tip.hidden).toBe(true);
+  });
+});
+
+describe('ChartWidget comparing with another symbol', () => {
+  const HOUR = 3_600_000;
+  const bars = Array.from({ length: 5 }, (_, i) => ({ time: i * HOUR, open: 1, high: 1, low: 1, close: 1, volume: 1 }));
+  const adapter = {
+    name: 'fake',
+    connect: () => {},
+    disconnect: () => {},
+    getConnectionState: () => 'connected',
+    fetchHistory: vi.fn(async () => bars),
+    on: () => {},
+    off: () => {},
+    dispose: () => {},
+  };
+
+  it('puts the other symbol on its own scale, in its own pane, as a spread or ratio, or as a correlation', async () => {
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false, adapter: adapter as never });
+    const fake = FakeChart.last;
+    await widget.addCompareSymbol('BBB', 'scale');
+    await widget.addCompareSymbol('BBB', 'pane');
+    await widget.addCompareSymbol('BBB', 'ratio');
+    await widget.addCompareSymbol('BBB', 'correlation');
+    await widget.addCompareSymbol('BBB', 'correlationLog');
+    expect(fake.added).toEqual([
+      ['compareSymbol', { symbol: 'BBB' }, 'bottom', { scale: 'left' }],
+      ['compareSymbolPane', { symbol: 'BBB' }, undefined, undefined],
+      ['spread', { symbol: 'BBB', mode: 'ratio' }, undefined, undefined],
+      ['correlation', { symbol: 'BBB' }, undefined, undefined],
+      ['correlationlog', { symbol: 'BBB' }, undefined, undefined],
+    ]);
+    expect(fake.moved).toEqual([]);
+  });
+
+  const dialogRows = () => [...document.querySelectorAll<HTMLElement>('.pcw-ss-row')].map((r) => r.dataset.symbol);
+  const addedRows = () => [...document.querySelectorAll<HTMLElement>('.pcw-ss-added-row')]
+    .map((r) => [r.querySelector('.pcw-ss-symbol')?.textContent, r.querySelector('.pcw-ss-way-label')?.textContent]);
+  const pickWay = (value: string) => {
+    const way = document.querySelector<HTMLSelectElement>('.pcw-ss-way select')!;
+    way.value = value;
+    way.dispatchEvent(new Event('change'));
+  };
+
+  it('opens the compare dialog from the toolbar: the other symbols, and the ways to add one', () => {
+    widget = new ChartWidget(host, { symbol: 'AAA', symbols: ['AAA', 'BBB', 'CCC'], watchlist: false, adapter: adapter as never });
+    host.querySelector<HTMLButtonElement>('[data-role="compare"]')!.click();
+    expect(document.querySelector('.pcw-ss h3')?.textContent).toBe('Compare symbol');
+    expect(dialogRows()).toEqual(['BBB', 'CCC']);
+    const way = document.querySelector<HTMLSelectElement>('.pcw-ss-way select')!;
+    expect([...way.options].map((o) => o.value)).toEqual(['percent', 'scale', 'pane', 'spread', 'ratio', 'correlation', 'correlationLog']);
+    expect(document.querySelector('.pcw-ss-empty')?.textContent).toBeUndefined();
+  });
+
+  it('adds the way chosen, lists it with a way to remove it, and opens next time on that way', async () => {
+    widget = new ChartWidget(host, { symbol: 'AAA', symbols: ['AAA', 'BBB', 'CCC'], watchlist: false, adapter: adapter as never });
+    const fake = FakeChart.last;
+    host.querySelector<HTMLButtonElement>('[data-role="compare"]')!.click();
+    pickWay('ratio');
+    document.querySelector<HTMLElement>('.pcw-ss-row[data-symbol="CCC"]')!.click();
+    await new Promise((r) => setTimeout(r, 0)); // its bars come first
+    expect(fake.added).toEqual([['spread', { symbol: 'CCC', mode: 'ratio' }, undefined, undefined]]);
+    expect(document.querySelector('.pcw-ss')).not.toBeNull(); // open for the next
+    fake.indicatorsShown = [{ instanceId: 'tc_spread_1', id: 'spread', params: { symbol: 'CCC', mode: 'ratio' }, descriptor: { name: 'Spread / Ratio' }, visible: true }];
+    fake.emit('indicatorAdd', {});
+    expect(addedRows()).toEqual([['CCC', 'Ratio']]);
+    document.querySelector<HTMLButtonElement>('.pcw-ss-remove')!.click();
+    expect(fake.removedIndicators).toEqual(['tc_spread_1']);
+    document.querySelector<HTMLButtonElement>('.pcw-ss .pcw-modal-close')!.click();
+    host.querySelector<HTMLButtonElement>('[data-role="compare"]')!.click();
+    expect(document.querySelector<HTMLSelectElement>('.pcw-ss-way select')!.value).toBe('ratio');
+  });
+
+  it('adds a percent comparison through the adapter and lists it in its colour', async () => {
+    widget = new ChartWidget(host, { symbol: 'AAA', symbols: ['AAA', 'BBB'], watchlist: false, adapter: adapter as never });
+    host.querySelector<HTMLButtonElement>('[data-role="compare"]')!.click();
+    document.querySelector<HTMLElement>('.pcw-ss-row[data-symbol="BBB"]')!.click();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(addedRows()).toEqual([['BBB', 'Percent change, on this scale']]);
+    expect(document.querySelector<HTMLElement>('.pcw-ss-added-row .pcw-ss-swatch')!.style.background).not.toBe('');
+    expect(document.querySelector('.pcw-ss-row[data-symbol="BBB"]')?.classList.contains('pcw-on-chart')).toBe(true);
+    document.querySelector<HTMLButtonElement>('.pcw-ss-remove')!.click();
+    expect(addedRows()).toEqual([]);
+  });
+
+  it('adds a percent comparison once, however quickly it is picked again', async () => {
+    widget = new ChartWidget(host, { symbol: 'AAA', symbols: ['AAA', 'BBB'], watchlist: false, adapter: adapter as never });
+    host.querySelector<HTMLButtonElement>('[data-role="compare"]')!.click();
+    const row = document.querySelector<HTMLElement>('.pcw-ss-row[data-symbol="BBB"]')!;
+    row.click();
+    row.click();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(addedRows()).toEqual([['BBB', 'Percent change, on this scale']]);
+  });
+
+  it('fetches the bars a chart’s indicator asks for, and again on a new interval', async () => {
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false, adapter: adapter as never, timeframe: '1h' });
+    const fake = FakeChart.last;
+    fake.emit('symbolSeriesRequest', { symbol: 'BBB' });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(fake.series.get('BBB')).toBe(bars);
+    expect(adapter.fetchHistory).toHaveBeenLastCalledWith('BBB', '1h', expect.any(Number));
+  });
+
+  /** An adapter that answers BBB with `answer`, and anything else with the bars. */
+  const adapterFor = (answer: () => Promise<unknown>) => ({
+    ...adapter,
+    fetchHistory: vi.fn((symbol: string) => (symbol === 'BBB' ? answer() : Promise.resolve(bars))),
+  });
+  const toastText = () => host.querySelector('.pcw-toast')?.textContent;
+
+  it('adds no compare on its own scale when the other symbol’s bars fail to load, as the percent way does', async () => {
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false, adapter: adapterFor(async () => { throw new Error('451'); }) as never });
+    const fake = FakeChart.last;
+    for (const way of ['scale', 'pane', 'ratio', 'correlation', 'percent'] as const) await widget.addCompareSymbol('BBB', way);
+    expect(fake.added).toEqual([]);
+    expect(fake.overlays).toEqual([]);
+    expect(toastText()).toBe('BBB: 451');
+  });
+
+  it('adds no compare when the other symbol has no bars at this interval, in any way', async () => {
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false, adapter: adapterFor(async () => []) as never });
+    const fake = FakeChart.last;
+    await widget.addCompareSymbol('BBB', 'scale');
+    await widget.addCompareSymbol('BBB', 'percent');
+    expect(fake.added).toEqual([]);
+    expect(fake.overlays).toEqual([]);
+    // Not a failure: the feed has no bars of it at the interval on screen.
+    expect(toastText()).toBe(`BBB: no bars at ${timeframeLabel(widget.getTimeframe())}`);
+  });
+
+  it('gives the chart the other symbol’s bars before adding the compare', async () => {
+    const own = adapterFor(async () => bars);
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false, adapter: own as never });
+    const fake = FakeChart.last;
+    const hadBars: boolean[] = [];
+    // As the chart does: an indicator on a symbol it has no bars of asks for them.
+    fake.addIndicator = (id, params) => {
+      const symbol = params.symbol as string;
+      hadBars.push(fake.series.has(symbol));
+      if (!fake.series.has(symbol)) fake.emit('symbolSeriesRequest', { symbol });
+      fake.added.push([id, params]);
+      return `tc_${id}_${fake.added.length}`;
+    };
+    await widget.addCompareSymbol('BBB', 'scale');
+    await new Promise((r) => setTimeout(r, 0));
+    expect(hadBars).toEqual([true]);
+    expect(fake.series.get('BBB')).toBe(bars);
+    expect(own.fetchHistory.mock.calls.filter(([symbol]) => symbol === 'BBB')).toHaveLength(1);
+  });
+
+  /**
+   * An adapter whose first answer for BBB, at 5m, waits for `release`; at
+   * another interval it answers with `later`.
+   */
+  const slowAt5m = (later: unknown[]) => {
+    const gate = { release: () => {} };
+    const own = {
+      ...adapter,
+      fetchHistory: vi.fn((symbol: string, timeframe: string) => {
+        if (symbol !== 'BBB') return Promise.resolve(bars);
+        if (timeframe !== '5m') return Promise.resolve(later);
+        return new Promise((resolve) => { gate.release = () => resolve(bars); });
+      }),
+    };
+    return { own, gate };
+  };
+  const bbbIntervals = (own: { fetchHistory: { mock: { calls: unknown[][] } } }) =>
+    own.fetchHistory.mock.calls.filter(([symbol]) => symbol === 'BBB').map(([, timeframe]) => timeframe);
+
+  it('fetches a compare again at the interval picked while its bars loaded', async () => {
+    const hourly = bars.map((b) => ({ ...b, close: 2 }));
+    for (const way of ['scale', 'percent'] as const) {
+      const { own, gate } = slowAt5m(hourly);
+      if (way === 'percent') widget.destroy();
+      widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false, adapter: own as never, timeframe: '5m' });
+      const fake = FakeChart.last;
+      const adding = widget.addCompareSymbol('BBB', way);
+      await widget.setTimeframe('1h');
+      gate.release();
+      await adding;
+      expect(bbbIntervals(own)).toEqual(['5m', '1h']);
+      if (way === 'scale') {
+        expect(fake.series.get('BBB')).toBe(hourly);
+        expect(fake.added.map(([id]) => id)).toEqual(['compareSymbol']);
+      } else {
+        expect(fake.overlayBars.get('cmp_BBB')).toBe(hourly);
+      }
+    }
+  });
+
+  it('adds no compare when the interval picked while its bars loaded has none', async () => {
+    const { own, gate } = slowAt5m([]);
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false, adapter: own as never, timeframe: '5m' });
+    const fake = FakeChart.last;
+    const adding = widget.addCompareSymbol('BBB', 'scale');
+    await widget.setTimeframe('1h');
+    gate.release();
+    await adding;
+    expect(bbbIntervals(own)).toEqual(['5m', '1h']);
+    expect(fake.added).toEqual([]);
+    expect(fake.series.has('BBB')).toBe(false);
+    expect(toastText()).toBe('BBB: no bars at 1H');
+  });
+
+  it('keeps a compare a saved state brings back without bars, and fills it on an interval that has them', async () => {
+    let refuse = true;
+    const own = adapterFor(async () => {
+      if (refuse) throw new Error('no bars of BBB at 5m');
+      return bars;
+    });
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false, adapter: own as never, timeframe: '5m' });
+    const fake = FakeChart.last;
+    fake.required = ['BBB'];
+    fake.emit('symbolSeriesRequest', { symbol: 'BBB' });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(fake.series.get('BBB')).toBeNull();
+    expect(fake.removedIndicators).toEqual([]);
+    refuse = false;
+    await widget.setTimeframe('1h');
+    await new Promise((r) => setTimeout(r, 0));
+    expect(fake.series.get('BBB')).toBe(bars);
+  });
+
+  it('names a compare by its symbol in Objects and lists it under Compare with its way', () => {
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false, adapter: adapter as never });
+    const fake = FakeChart.last;
+    fake.indicatorsShown = [{
+      instanceId: 'c1', id: 'compareSymbol', params: { symbol: 'BBB' }, visible: true,
+      descriptor: { name: 'Compare Symbol', defaultConfig: { symbol: '' }, shortName: 'Compare' },
+    }];
+    widget.openPanel('objectTree');
+    const section = (title: string) => [...host.querySelectorAll<HTMLElement>('.pcw-tree-section')]
+      .find((s) => s.querySelector('.pcw-tree-section-head span')?.textContent === title)!;
+    const names = (title: string) => [...section(title).querySelectorAll('.pcw-tree-row')].map((r) => r.textContent);
+    expect(names('Indicators')).toEqual(['Compare BBB']);
+    expect(names('Compare')).toEqual(['BBBPrice, on its own scale']);
+    expect(section('Compare').textContent).not.toContain('No comparisons');
+    section('Compare').querySelector<HTMLButtonElement>('[aria-label="Remove comparison"]')!.click();
+    expect(fake.removedIndicators).toEqual(['c1']);
+  });
+
+  it('lists a compare in a pane of its own with that way, and takes it off the chart, pane and all', () => {
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false, adapter: adapter as never });
+    const fake = FakeChart.last;
+    fake.indicatorsShown = [{
+      instanceId: 'p1', id: 'compareSymbolPane', params: { symbol: 'BBB' }, visible: true,
+      descriptor: { name: 'Compare Symbol (Pane)', defaultConfig: { symbol: '' }, shortName: 'Compare' },
+    }];
+    widget.openPanel('objectTree');
+    const section = [...host.querySelectorAll<HTMLElement>('.pcw-tree-section')]
+      .find((s) => s.querySelector('.pcw-tree-section-head span')?.textContent === 'Compare')!;
+    expect([...section.querySelectorAll('.pcw-tree-row')].map((r) => r.textContent)).toEqual(['BBBPrice, in a pane of its own']);
+    section.querySelector<HTMLButtonElement>('[aria-label="Remove comparison"]')!.click();
+    expect(fake.removedIndicators).toEqual(['p1']);
+  });
+
+  it('keeps an indicator’s full name in its Objects row’s tooltip', () => {
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false });
+    FakeChart.last.indicatorsShown = [{
+      instanceId: 'b1', id: 'bb', params: { period: 20, stdDev: 2 }, visible: true,
+      descriptor: { name: 'Bollinger Bands', defaultConfig: { period: 20, stdDev: 2 }, shortName: 'BB' },
+    }];
+    widget.openPanel('objectTree');
+    const name = host.querySelector<HTMLElement>('.pcw-tree-section .pcw-tree-row .pcw-tree-name')!;
+    expect(name.textContent).toBe('BB 20 2');
+    expect(name.title).toBe('Bollinger Bands');
+  });
+});
+
+describe('ChartWidget percent compares and the price scale', () => {
+  const HOUR = 3_600_000;
+  const bars = Array.from({ length: 5 }, (_, i) => ({ time: i * HOUR, open: 1, high: 1, low: 1, close: 1, volume: 1 }));
+  const feed = () => ({
+    name: 'fake',
+    connect: () => {},
+    disconnect: () => {},
+    getConnectionState: () => 'connected',
+    fetchHistory: vi.fn(async (_symbol: string, _tf: string, _limit: number) => bars),
+    on: () => {},
+    off: () => {},
+    dispose: () => {},
+  });
+  let adapter: ReturnType<typeof feed>;
+  const make = (options: Record<string, unknown> = {}) => {
+    adapter = feed();
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false, adapter: adapter as never, ...options });
+    return FakeChart.last;
+  };
+  /** Take compares off from the compare dialog, as the user does: `count` of them, or all. */
+  const removeCompares = (count = Infinity) => {
+    host.querySelector<HTMLButtonElement>('[data-role="compare"]')!.click();
+    for (let i = 0; i < count; i++) {
+      const remove = document.querySelector<HTMLButtonElement>('.pcw-ss-remove');
+      if (!remove) break;
+      remove.click();
+    }
+    document.querySelector<HTMLButtonElement>('.pcw-ss .pcw-modal-close')!.click();
+  };
+  const percentSwitch = () => host.querySelector<HTMLButtonElement>('[data-scale="percent"]')!;
+  const logSwitch = () => host.querySelector<HTMLButtonElement>('[data-scale="log"]')!;
+  /** A scale mode in the price axis's menu. */
+  const scaleMenuItem = (label: string) => {
+    FakeChart.last.emit('chartContextMenu', { area: 'priceAxis', x: 10, y: 10, price: 95 });
+    return [...host.querySelectorAll<HTMLElement>('.pcw-context-menu:not([hidden]) [role^=menuitem]')]
+      .find((b) => b.querySelector('.pcw-context-label')?.textContent === label)!;
+  };
+  const scaleSelect = () => document.querySelector<HTMLSelectElement>('select[aria-label="Price scale"]')!;
+  const openSettings = () => (widget as unknown as { chartSettings: { openSettings(tab: string): void } }).chartSettings.openSettings('scales');
+
+  it('reads the price scale in percent while a symbol is compared in percent, and goes back after the last', async () => {
+    const fake = make();
+    await widget.addCompareSymbol('BBB');
+    expect(fake.scaleMode).toBe('percentage');
+    await widget.addCompareSymbol('CCC');
+    expect(percentSwitch().getAttribute('aria-pressed')).toBe('true');
+    removeCompares(1);
+    expect(fake.scaleMode).toBe('percentage');
+    removeCompares();
+    expect(fake.scaleMode).toBe('regular');
+    expect(percentSwitch().getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('keeps the user’s scale in a saved layout and a shared link while comparing', async () => {
+    make();
+    await widget.addCompareSymbol('BBB');
+    expect(widget.captureLayout().scaleMode).toBe('regular');
+    expect(decodeWidgetState(widget.exportState())!.scaleMode).toBe('regular');
+  });
+
+  it('keeps a scale the user picks while comparing, the last compare gone too', async () => {
+    const fake = make();
+    await widget.addCompareSymbol('BBB');
+    percentSwitch().click(); // % off: back to prices
+    expect(fake.scaleMode).toBe('regular');
+    // Only the first compare puts the scale in percent.
+    await widget.addCompareSymbol('CCC');
+    expect(fake.scaleMode).toBe('regular');
+    removeCompares();
+    expect(fake.scaleMode).toBe('regular');
+
+    await widget.addCompareSymbol('BBB');
+    scaleMenuItem('Indexed to 100').click();
+    removeCompares();
+    expect(fake.scaleMode).toBe('indexedTo100');
+  });
+
+  it('puts the percent scale back on an undo of a pick made while comparing', async () => {
+    const fake = make();
+    await widget.addCompareSymbol('BBB');
+    percentSwitch().click();
+    expect(fake.undos).toHaveLength(1);
+    fake.undos[0].undo();
+    expect(fake.scaleMode).toBe('percentage');
+    fake.undos[0].redo();
+    expect(fake.scaleMode).toBe('regular');
+  });
+
+  it('leaves a log scale alone while comparing', async () => {
+    const fake = make();
+    logSwitch().click();
+    await widget.addCompareSymbol('BBB');
+    expect(fake.scaleMode).toBe('logarithmic');
+    removeCompares();
+    expect(fake.scaleMode).toBe('logarithmic');
+  });
+
+  it('leaves a scale already in percent or indexed to 100 alone', async () => {
+    const fake = make();
+    scaleMenuItem('Indexed to 100').click();
+    await widget.addCompareSymbol('BBB');
+    removeCompares();
+    expect(fake.scaleModes).not.toContain('percentage');
+    expect(fake.scaleMode).toBe('indexedTo100');
+  });
+
+  it('keeps the percent scale through a layout restore and a shared link while comparing', async () => {
+    const fake = make();
+    await widget.addCompareSymbol('BBB');
+    await widget.restoreLayout({ ...widget.captureLayout(), scaleMode: 'regular' });
+    expect(fake.scaleMode).toBe('percentage');
+    await widget.importState(widget.exportState());
+    expect(fake.scaleMode).toBe('percentage');
+  });
+
+  it('shows the scale on screen in the settings and the chart menu while comparing', async () => {
+    const fake = make();
+    await widget.addCompareSymbol('BBB');
+    expect(scaleMenuItem('Percentage').getAttribute('aria-checked')).toBe('true');
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    openSettings();
+    expect(scaleSelect().value).toBe('percentage');
+    scaleSelect().value = 'regular';
+    scaleSelect().dispatchEvent(new Event('change'));
+    expect(fake.scaleMode).toBe('regular');
+    // Cancel puts back what the settings changed: the percent scale too.
+    document.querySelector<HTMLButtonElement>('.pcw-set .pcw-modal-footer [data-act="cancel"]')!.click();
+    expect(fake.scaleMode).toBe('percentage');
+  });
+
+  it('fetches a percent comparison as deep as the bars on the chart', async () => {
+    const fake = make({ timeframe: '1h' });
+    fake.barsLoaded = Array.from({ length: 900 }, (_, i) => ({ time: i * HOUR, close: 1 }));
+    await widget.addCompareSymbol('BBB');
+    expect(adapter.fetchHistory).toHaveBeenCalledWith('BBB', '1h', 900);
+  });
+
+  it('fetches the percent comparisons again, as deep, once older bars load, from a feed that can’t page back', async () => {
+    const fake = make({ timeframe: '1h' });
+    await widget.addCompareSymbol('BBB');
+    fake.barsLoaded = chartWithOlder(800);
+    fake.emit('historyLoad', { state: 'loaded', count: 800 });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(adapter.fetchHistory).toHaveBeenLastCalledWith('BBB', '1h', 805);
+    expect(fake.compareData).toEqual([['cmp_BBB', bars]]);
+  });
+
+  /** `count` hourly bars ending an hour before `end`. */
+  const hoursBefore = (end: number, count: number) =>
+    Array.from({ length: count }, (_, i) => ({ time: end - (count - i) * HOUR, open: 1, high: 1, low: 1, close: 1, volume: 1 }));
+  /** The chart's bars: `older` hours before the compare's first, then the hours it has. */
+  const chartWithOlder = (older: number) => [...hoursBefore(0, older), ...bars];
+
+  it('asks a feed that can’t page back no more for a comparison it gave nothing older', async () => {
+    const fake = make({ timeframe: '1h' });
+    await widget.addCompareSymbol('BBB');
+    for (let page = 1; page <= 3; page++) {
+      fake.barsLoaded = chartWithOlder(500 * page);
+      fake.emit('historyLoad', { state: 'loaded', count: 500 });
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    // Added, then the first page as deep as the chart: five bars, its whole history. No page after asks.
+    expect(adapter.fetchHistory.mock.calls.map((c) => c[2])).toEqual([500, 505]);
+  });
+
+  it('asks a feed that can’t page back again on the next page while it has older bars to give', async () => {
+    const fake = make({ timeframe: '1h' });
+    adapter.fetchHistory.mockImplementation(async (_symbol: string, _tf: string, limit: number) => hoursBefore(5 * HOUR, limit));
+    await widget.addCompareSymbol('BBB');
+    fake.barsLoaded = chartWithOlder(500);
+    fake.emit('historyLoad', { state: 'loaded', count: 500 });
+    await new Promise((r) => setTimeout(r, 0));
+    fake.barsLoaded = chartWithOlder(1000);
+    fake.emit('historyLoad', { state: 'loaded', count: 500 });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(adapter.fetchHistory.mock.calls.map((c) => c[2])).toEqual([500, 505, 1005]);
+    // The chart's first bar reached: the next page with none older asks nothing.
+    fake.emit('historyLoad', { state: 'loaded', count: 0 });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(adapter.fetchHistory).toHaveBeenCalledTimes(3);
+  });
+
+  it('fetches only the stretch older bars added to each percent comparison', async () => {
+    const fake = make({ timeframe: '1h' });
+    const fetchHistoryBefore = vi.fn(async (_symbol: string, _tf: string, before: number, limit: number) => hoursBefore(before, limit));
+    Object.assign(adapter, { fetchHistoryBefore });
+    await widget.addCompareSymbol('BBB');
+    fake.barsLoaded = chartWithOlder(3);
+    fake.emit('historyLoad', { state: 'loaded', count: 3 });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(fetchHistoryBefore.mock.calls).toEqual([['BBB', '1h', 0, 3]]);
+    expect(adapter.fetchHistory).toHaveBeenCalledTimes(1);
+    expect(fake.compareData).toEqual([['cmp_BBB', [...hoursBefore(0, 3), ...bars]]]);
+    // Nothing older on the chart than the line has: nothing to ask for.
+    fake.emit('historyLoad', { state: 'loaded', count: 0 });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(fetchHistoryBefore).toHaveBeenCalledTimes(1);
+  });
+
+  it('asks once more, for what is still missing, after pages that load while a stretch is on its way', async () => {
+    const fake = make({ timeframe: '1h' });
+    const gate = { release: () => {} };
+    const fetchHistoryBefore = vi.fn((_symbol: string, _tf: string, before: number, limit: number) => (
+      fetchHistoryBefore.mock.calls.length === 1
+        ? new Promise((resolve) => { gate.release = () => resolve(hoursBefore(before, limit)); })
+        : Promise.resolve(hoursBefore(before, limit))));
+    Object.assign(adapter, { fetchHistoryBefore });
+    await widget.addCompareSymbol('BBB');
+    fake.barsLoaded = chartWithOlder(3);
+    fake.emit('historyLoad', { state: 'loaded', count: 3 });
+    for (const older of [6, 9]) {
+      fake.barsLoaded = chartWithOlder(older);
+      fake.emit('historyLoad', { state: 'loaded', count: 3 });
+    }
+    gate.release();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(fetchHistoryBefore.mock.calls).toEqual([['BBB', '1h', 0, 3], ['BBB', '1h', -3 * HOUR, 6]]);
+    expect(fake.compareData.at(-1)).toEqual(['cmp_BBB', [...hoursBefore(0, 9), ...bars]]);
+  });
+
+  it('drops an older stretch that comes after the interval changed', async () => {
+    const fake = make({ timeframe: '1h' });
+    const gate = { release: () => {} };
+    const fetchHistoryBefore = vi.fn((_symbol: string, _tf: string, before: number, limit: number) =>
+      new Promise((resolve) => { gate.release = () => resolve(hoursBefore(before, limit)); }));
+    Object.assign(adapter, { fetchHistoryBefore });
+    await widget.addCompareSymbol('BBB');
+    fake.barsLoaded = chartWithOlder(3);
+    fake.emit('historyLoad', { state: 'loaded', count: 3 });
+    await widget.setTimeframe('4h');
+    await new Promise((r) => setTimeout(r, 0));
+    const fullRefetch = fake.compareData.length;
+    gate.release();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(fake.compareData).toHaveLength(fullRefetch);
+  });
+
+  it('puts no older stretch at the new interval in front of bars still at the one before, and asks for it once they come', async () => {
+    const FOUR_HOURS = 4 * HOUR;
+    /** `count` 4h bars from `from`. */
+    const fourHours = (from: number, count: number) =>
+      Array.from({ length: count }, (_, i) => ({ time: from + i * FOUR_HOURS, open: 1, high: 1, low: 1, close: 1, volume: 1 }));
+    const fake = make({ timeframe: '1h' });
+    const gate = { release: (_bars: typeof bars) => {} };
+    adapter.fetchHistory.mockImplementation((_symbol, tf) => (tf === '4h'
+      ? new Promise((resolve) => { gate.release = resolve; })
+      : Promise.resolve(bars)));
+    const fetchHistoryBefore = vi.fn(async (_symbol: string, _tf: string, before: number, limit: number) =>
+      fourHours(before - limit * FOUR_HOURS, limit));
+    Object.assign(adapter, { fetchHistoryBefore });
+    await widget.addCompareSymbol('BBB');
+    await widget.setTimeframe('4h');
+    // The compare's 4h bars are on their way when a page of older 4h bars loads.
+    fake.barsLoaded = fourHours(-4 * FOUR_HOURS, 8);
+    fake.emit('historyLoad', { state: 'loaded', count: 4 });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(fetchHistoryBefore).not.toHaveBeenCalled();
+    expect(fake.compareData).toEqual([]);
+    gate.release(fourHours(0, 4));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(fetchHistoryBefore.mock.calls).toEqual([['BBB', '4h', 0, 4]]);
+    expect(fake.compareData).toEqual([['cmp_BBB', fourHours(0, 4)], ['cmp_BBB', fourHours(-4 * FOUR_HOURS, 8)]]);
+  });
+
+  it('keeps no older stretch waiting for bars that failed to come at the new interval', async () => {
+    const FOUR_HOURS = 4 * HOUR;
+    const fake = make({ timeframe: '1h' });
+    adapter.fetchHistory.mockImplementation(async (_symbol, tf) => {
+      if (tf === '4h') throw new Error('down');
+      return bars;
+    });
+    const fetchHistoryBefore = vi.fn(async (_symbol: string, _tf: string, before: number, limit: number) => hoursBefore(before, limit));
+    Object.assign(adapter, { fetchHistoryBefore });
+    await widget.addCompareSymbol('BBB');
+    await widget.setTimeframe('4h');
+    await new Promise((r) => setTimeout(r, 0));
+    // A page of older 4h bars loads while the line keeps its 1h bars.
+    fake.barsLoaded = Array.from({ length: 8 }, (_, i) => ({ time: (i - 4) * FOUR_HOURS, close: 1 }));
+    fake.emit('historyLoad', { state: 'loaded', count: 4 });
+    await new Promise((r) => setTimeout(r, 0));
+    // Back at 1h the line's bars come as the feed has them, and no page loaded since: no stretch to ask for.
+    fake.barsLoaded = chartWithOlder(3);
+    await widget.setTimeframe('1h');
+    await new Promise((r) => setTimeout(r, 0));
+    expect(fetchHistoryBefore).not.toHaveBeenCalled();
+  });
+
+  it('holds no percent scale on a chart type that draws no compare lines, and holds it again off it', async () => {
+    const fake = make();
+    fake.timeAligned = false; // Renko, say
+    await widget.addCompareSymbol('BBB');
+    expect(fake.scaleMode).toBe('regular');
+    expect(percentSwitch().getAttribute('aria-pressed')).toBe('false');
+    fake.timeAligned = true;
+    fake.emit('chartTypeChange', { type: 'candlestick', previous: 'renko' });
+    expect(fake.scaleMode).toBe('percentage');
+    expect(percentSwitch().getAttribute('aria-pressed')).toBe('true');
+    fake.timeAligned = false;
+    fake.emit('chartTypeChange', { type: 'kagi', previous: 'candlestick' });
+    expect(fake.scaleMode).toBe('regular');
+    // The user's scale all along: layouts keep it.
+    expect(widget.captureLayout().scaleMode).toBe('regular');
+  });
+
+  it('leaves the scale alone where the chart takes no compare lines', async () => {
+    const fake = make({ chartOptions: { features: { compareSymbols: false } } });
+    fake.features = { compareSymbols: false };
+    await widget.addCompareSymbol('BBB');
+    expect(fake.overlays).toEqual([]);
+    expect(fake.scaleModes).not.toContain('percentage');
+  });
+});
+
+describe('ChartWidget round 8 review', () => {
+  it('lets the chart ask again after a failed fetch', async () => {
+    const failing = {
+      name: 'fake', connect: () => {}, disconnect: () => {}, getConnectionState: () => 'connected',
+      fetchHistory: vi.fn(async () => { throw new Error('451'); }), on: () => {}, off: () => {}, dispose: () => {},
+    };
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false, adapter: failing as never });
+    FakeChart.last.emit('symbolSeriesRequest', { symbol: 'BBB' });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(FakeChart.last.series.get('BBB')).toBeNull(); // what it had: nothing
+  });
+
+  it('starts its settings where the chart options put them', () => {
+    widget = new ChartWidget(host, {
+      symbol: 'AAA', watchlist: false,
+      chartOptions: { highLowLines: true, extendedHours: false, chartTypeOptions: { renko: { boxSize: 5 } } },
+    });
+    const settings = (widget as unknown as { chartSettings: { settingsState: Record<string, unknown> } }).chartSettings.settingsState;
+    expect(settings).toMatchObject({ highLowLines: true, extendedHours: false, chartTypeOptions: { renko: { boxSize: 5 } } });
+  });
+});
+
+describe('ChartWidget symbol fetches out of order', () => {
+  it('lets only the latest fetch of a symbol answer', async () => {
+    const bars = [{ time: 0, open: 1, high: 1, low: 1, close: 1, volume: 1 }];
+    let failFirst: (e: Error) => void = () => {};
+    const fetchHistory = vi.fn()
+      .mockImplementationOnce(() => new Promise((_, reject) => { failFirst = reject; }))
+      .mockImplementationOnce(async () => bars);
+    const adapter = { name: 'fake', connect: () => {}, disconnect: () => {}, getConnectionState: () => 'connected', fetchHistory, on: () => {}, off: () => {}, dispose: () => {} };
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false, adapter: adapter as never });
+    const fake = FakeChart.last;
+    fake.emit('symbolSeriesRequest', { symbol: 'BBB' });
+    fake.emit('symbolSeriesRequest', { symbol: 'BBB' });
+    await new Promise((r) => setTimeout(r, 0));
+    failFirst(new Error('late'));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(fake.series.get('BBB')).toBe(bars);
+  });
+});
+
+describe('ChartWidget look', () => {
+  it('starts in the Modern look, takes a preset or a theme, and gives the chart its tag shape', () => {
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false });
+    const root = host.querySelector<HTMLElement>('.pcw-root')!;
+    expect(root.dataset.pcwUi).toBe('modern');
+    // Without `ui` the tokens stay the stylesheet's (Modern's), yours to override in CSS.
+    expect(root.style.getPropertyValue('--1p-control-radius')).toBe('');
+    expect(FakeChart.last.shapes.at(-1)).toEqual({ tagRadius: 2 });
+
+    widget.setUI({ preset: 'capsule', radius: { lg: 14 } });
+    expect(root.dataset.pcwToolbar).toBe('floating');
+    expect(root.style.getPropertyValue('--1p-menu-radius')).toBe('14px');
+    expect(FakeChart.last.shapes.at(-1)).toEqual({ tagRadius: 999 });
+    expect(widget.getUI().preset).toBe('capsule');
+    // The modal portal carries the same look.
+    const portal = (widget as unknown as { portal: HTMLElement }).portal;
+    expect(portal.dataset.pcwToolbar).toBe('floating');
+  });
+
+  it('keeps the look across a theme switch, on the root and the dialogs alike', () => {
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false });
+    widget.setTheme('light');
+    widget.setUI('terminal');
+    const portal = (widget as unknown as { portal: HTMLElement }).portal;
+    expect(portal.dataset.pcwTheme).toBe('light');
+    expect(portal.style.getPropertyValue('--1p-control-h')).toBe('26px');
+    widget.setTheme('dark');
+    expect(host.querySelector<HTMLElement>('.pcw-root')!.dataset.pcwUi).toBe('terminal');
+    expect(widget.getUI().preset).toBe('terminal');
+  });
+
+  it('leaves the chart the tag shape its options give, until a look is set', () => {
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false, chartOptions: { shapes: { tagRadius: 0 } } });
+    expect(FakeChart.last.shapes).toEqual([]);
+    widget.setUI('capsule');
+    expect(FakeChart.last.shapes.at(-1)).toEqual({ tagRadius: 999 });
+  });
+
+  // The 10 px slot showed about 168 bars across a 1920 px screen; φ⁴ ≈ 6.85 shows about 250.
+  it('opens the chart with golden bars in every look, and the classic 2 px gap only when compact', () => {
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false });
+    expect(FakeChart.last.barLayouts.at(-1)).toBe('golden');
+    widget.setUI({ density: 'compact' });
+    expect(FakeChart.last.barLayouts.at(-1)).toBe('classic');
+    for (const preset of ['studio', 'terminal', 'capsule', 'desk'] as const) {
+      widget.setUI(preset);
+      expect(FakeChart.last.barLayouts.at(-1), preset).toBe('golden');
+    }
+    widget.setUI({ preset: 'terminal', density: 'spacious' });
+    expect(FakeChart.last.barLayouts.at(-1)).toBe('golden');
+  });
+
+  it('gives the chart room around its bars, and the room of 1.x in the classic and compact densities', () => {
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false });
+    expect(FakeChart.last.densities.at(-1)).toBe('comfortable');
+    // Classic is the widget of 1.x: the chart's compact margins, with the golden bars it had.
+    widget.setUI({ density: 'classic' });
+    expect(FakeChart.last.densities.at(-1)).toBe('compact');
+    expect(FakeChart.last.barLayouts.at(-1)).toBe('golden');
+    widget.setUI({ density: 'compact' });
+    expect(FakeChart.last.densities.at(-1)).toBe('compact');
+    expect(FakeChart.last.barLayouts.at(-1)).toBe('classic');
+    for (const density of ['spacious', 'airy'] as const) {
+      widget.setUI({ density });
+      expect(FakeChart.last.densities.at(-1), density).toBe('comfortable');
+    }
+  });
+
+  it('leaves the density chartOptions.density gives', () => {
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false, chartOptions: { density: 'compact' } });
+    widget.setUI({ density: 'spacious' });
+    expect(FakeChart.last.densities).toEqual([]);
+    expect(FakeChart.last.options.density).toBe('compact');
+  });
+
+  it('writes the classic density’s spacing on the root, and takes it off for the stylesheet’s', () => {
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false, ui: { density: 'classic' } });
+    const root = host.querySelector<HTMLElement>('.pcw-root')!;
+    expect(root.style.getPropertyValue('--1p-space-2')).toBe('3px');
+    expect(root.style.getPropertyValue('--1p-control-h')).toBe('28px');
+    expect(root.style.getPropertyValue('--1p-text-w')).toBe('auto');
+    widget.setUI({ density: 'comfortable' });
+    expect(root.style.getPropertyValue('--1p-space-2')).toBe('4px');
+    expect(root.style.getPropertyValue('--1p-control-h')).toBe('28px');
+    expect(root.style.getPropertyValue('--1p-text-w')).not.toBe('auto');
+  });
+
+  it('leaves the bars chartOptions.barLayout gives, in the default look and in compact', () => {
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false, chartOptions: { barLayout: 'classic' } });
+    widget.setUI('studio');
+    expect(FakeChart.last.barLayouts).toEqual([]);
+    widget.destroy();
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false, ui: { density: 'compact' }, chartOptions: { barLayout: 'golden' } });
+    expect(FakeChart.last.barLayouts).toEqual([]);
+  });
+
+  it('gives the chart golden bars and sans figures in the airy look, and takes them back', () => {
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false, ui: { density: 'airy' } });
+    expect(FakeChart.last.barLayouts.at(-1)).toBe('golden');
+    // Words on drawings in the look's own sans face.
+    expect(FakeChart.last.fonts.at(-1)).toEqual({ family: SANS_FONT_FAMILY, textFamily: widget.getUI().font.family });
+    widget.setUI({ preset: 'terminal', density: 'compact' });
+    expect(FakeChart.last.barLayouts.at(-1)).toBe('classic');
+    expect(FakeChart.last.fonts.at(-1)).toEqual({ family: widget.getUI().font.mono, textFamily: widget.getUI().font.family });
+  });
+
+  it('draws the chart’s figures in the look’s figures face: a sans face by default, Tahoma in Desk, and back', () => {
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false });
+    const figures = widget.getUI().font.mono;
+    const words = widget.getUI().font.family;
+    expect(FakeChart.last.fonts.at(-1)).toEqual({ family: figures, textFamily: words });
+    widget.setUI('desk');
+    expect((FakeChart.last.fonts.at(-1) as { family: string }).family).toMatch(/^Tahoma,/);
+    widget.setUI('modern');
+    expect(FakeChart.last.fonts.at(-1)).toEqual({ family: figures, textFamily: words });
+  });
+
+  it('leaves a chart face of yours in Print and Desk too', () => {
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false, chartOptions: { font: { family: 'Cascadia Mono' } } });
+    widget.setUI('desk');
+    expect(FakeChart.last.fonts).toEqual([]);
+  });
+
+  it('leaves the chart the bars and the font its options give, in any look', () => {
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false, ui: { density: 'airy' }, chartOptions: { barLayout: 'classic', font: { family: 'Plex Sans' } } });
+    widget.setUI('terminal');
+    expect(FakeChart.last.barLayouts).toEqual([]);
+    expect(FakeChart.last.fonts).toEqual([]);
+  });
+
+  it('gives a chart font of yours that sets only sizes the airy look’s face, and keeps the sizes after', () => {
+    const yours = { sizeSmall: 13 };
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false, ui: { density: 'airy' }, chartOptions: { font: yours } });
+    // The font as drawn: each setFont goes over the one before, null goes back to the theme's.
+    const drawn = () => FakeChart.last.fonts.reduce<object>((font, next) => (next === null ? {} : { ...font, ...(next as object) }), yours);
+    expect(drawn()).toEqual({ sizeSmall: 13, family: SANS_FONT_FAMILY, textFamily: widget.getUI().font.family });
+    widget.setUI('terminal');
+    expect(drawn()).toEqual({ sizeSmall: 13, family: widget.getUI().font.mono, textFamily: widget.getUI().font.family });
+  });
+
+  it('takes the look from its options', () => {
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false, ui: 'terminal' });
+    const root = host.querySelector<HTMLElement>('.pcw-root')!;
+    expect(root.dataset.pcwSeparators).toBe('on');
+    expect(root.style.getPropertyValue('--1p-control-h')).toBe('26px');
+  });
+});
+
+describe('ChartWidget object tree drawings', () => {
+  it('lists a drawing by its own name, and renames, clones, moves and selects it on the chart', () => {
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false });
+    const fake = FakeChart.last as unknown as Record<string, unknown>;
+    const calls: unknown[][] = [];
+    fake.getDrawings = () => [
+      { id: 'a', type: 'trendLine', anchors: [], style: {}, visible: true, locked: false, name: 'Weekly support' },
+      { id: 'b', type: 'ray', anchors: [], style: {}, visible: true, locked: false },
+    ];
+    fake.isDrawingShown = () => true;
+    for (const method of ['updateDrawing', 'duplicateDrawing', 'moveDrawing', 'selectDrawing']) {
+      fake[method] = (...args: unknown[]) => { calls.push([method, ...args]); return true; };
+    }
+    widget.openPanel('objectTree');
+    const row = (id: string) => host.querySelector<HTMLElement>(`.pcw-tree-row[data-drawing-id="${id}"]`)!;
+    expect(row('a').querySelector('.pcw-tree-name')!.textContent).toBe('Weekly support');
+    expect(row('b').querySelector('.pcw-tree-name')!.textContent).toBe('Ray');
+    row('b').querySelector<HTMLElement>('.pcw-tree-name')!.click();
+    row('b').querySelector<HTMLButtonElement>('[aria-label="Clone"]')!.click();
+    // Listed b, a (the top first): down takes b under a, to a's place.
+    row('b').querySelector<HTMLElement>('[aria-label="Drag to reorder"]')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown' }));
+    const name = row('a').querySelector<HTMLElement>('.pcw-tree-name')!;
+    name.dispatchEvent(new MouseEvent('dblclick'));
+    const input = row('a').querySelector<HTMLInputElement>('input')!;
+    input.value = '';
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+    expect(calls).toEqual([
+      ['selectDrawing', 'b'],
+      ['duplicateDrawing', 'b'],
+      ['moveDrawing', 'b', 0],
+      ['updateDrawing', 'a', { name: null }],
+    ]);
+  });
+});
+
+describe('ChartWidget on a wide screen', () => {
+  const wide = (width: number) => vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(width);
+  const chartFont = { family: 'x', sizeSmall: 11, sizeMedium: 13, sizeLarge: 15 };
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    delete (FakeChart.prototype as unknown as Record<string, unknown>).getFont;
+  });
+
+  it('draws its bars, buttons, icons and type bigger on 4K, and the chart’s type with them', () => {
+    (FakeChart.prototype as unknown as Record<string, unknown>).getFont = () => ({ ...chartFont });
+    wide(2600);
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false });
+    const root = host.querySelector<HTMLElement>('.pcw-root')!;
+    expect(root.style.getPropertyValue('--1p-toolbar-h')).toBe('44px');
+    expect(root.style.getPropertyValue('--1p-font-size')).toBe('15px');
+    const fonts = FakeChart.last.fonts as Record<string, unknown>[];
+    expect(fonts[fonts.length - 1]).toMatchObject({ sizeSmall: 13, sizeMedium: 15, sizeLarge: 18 });
+  });
+
+  it('sets only the sizes it grows, so the other tokens a host sets in CSS stay', () => {
+    wide(2600);
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false });
+    const root = host.querySelector<HTMLElement>('.pcw-root')!;
+    expect(root.style.getPropertyValue('--1p-icon')).toBe('18px');
+    // The drawing tools grow with the rest: their icon and button a half step over the others'
+    // (22 against 18, 40 against 32), in a column grown to 52.
+    expect(root.style.getPropertyValue('--1p-tool-h')).toBe('40px');
+    expect(root.style.getPropertyValue('--1p-tool-icon')).toBe('22px');
+    expect(root.style.getPropertyValue('--1p-sidebar-w')).toBe('52px');
+    // A line of the grown type is an even height too: 22 px at 15 px.
+    expect(parseFloat(root.style.getPropertyValue('--1p-line-height')) * 15).toBeCloseTo(22, 3);
+    // Spacing is the stylesheet's still.
+    expect(root.style.getPropertyValue('--1p-space-2')).toBe('');
+    expect(root.style.getPropertyValue('--1p-radius')).toBe('');
+    expect(root.style.getPropertyValue('--1p-font')).toBe('');
+  });
+
+  it('changes size only once the width is a little past a step, and leaves the type of the chart alone at 1', () => {
+    (FakeChart.prototype as unknown as Record<string, unknown>).getFont = () => ({ ...chartFont });
+    const observers: ((entries: unknown[]) => void)[] = [];
+    const resized = () => observers.forEach((cb) => cb([]));
+    vi.stubGlobal('ResizeObserver', class { constructor(cb: (entries: unknown[]) => void) { observers.push(cb); } observe() {} disconnect() {} });
+    const width = wide(1440);
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false });
+    const root = host.querySelector<HTMLElement>('.pcw-root')!;
+    expect((FakeChart.last.fonts as Record<string, unknown>[]).every((f) => f.sizeSmall === undefined)).toBe(true);
+    width.mockReturnValue(1810);
+    resized();
+    expect(root.style.getPropertyValue('--1p-toolbar-h')).toBe('');
+    width.mockReturnValue(1830);
+    resized();
+    expect(root.style.getPropertyValue('--1p-toolbar-h')).toBe('42px');
+    vi.unstubAllGlobals();
+  });
+
+  it('keeps its sizes on a laptop, and at every width with a scale of 1', () => {
+    wide(1440);
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false });
+    expect(host.querySelector<HTMLElement>('.pcw-root')!.style.getPropertyValue('--1p-toolbar-h')).toBe('');
+    widget.destroy();
+    wide(2600);
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false, ui: { scale: 1 } });
+    expect(host.querySelector<HTMLElement>('.pcw-root')!.style.getPropertyValue('--1p-toolbar-h')).toBe('38px');
+  });
+});
+
+describe('ChartWidget text typed in place', () => {
+  const setUp = () => {
+    widget = new ChartWidget(host, { symbol: 'AAA', watchlist: false });
+    const fake = FakeChart.last as unknown as Record<string, unknown> & { emit(e: string, p: unknown): void };
+    const calls: unknown[][] = [];
+    fake.getDrawings = () => [{ id: 't', type: 'text', anchors: [], style: { color: '#fff', text: 'Old', fontSize: 16, bold: true }, visible: true, locked: false }];
+    fake.getDrawingTextRect = () => ({ x: 10, y: 20, width: 60, height: 28 });
+    for (const method of ['beginDrawingEdit', 'updateDrawing', 'endDrawingEdit', 'takeBackDrawing', 'amendNewDrawing']) {
+      fake[method] = (...args: unknown[]) => { calls.push([method, ...args]); return true; };
+    }
+    return { fake, calls };
+  };
+  const area = () => document.querySelector<HTMLTextAreaElement>('.pcw-inline-text-input');
+  const press = (key: string) => area()!.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }));
+
+  afterEach(() => document.querySelectorAll('.pcw-inline-text').forEach((el) => el.remove()));
+
+  it('opens over a text on a double-click instead of its settings, and keeps what is typed', () => {
+    const { fake, calls } = setUp();
+    fake.emit('drawingDoubleClick', { id: 't' });
+    expect(area()?.value).toBe('Old');
+    expect(area()!.style.fontSize).toBe('16px');
+    expect(document.querySelector('.pcw-modal-tab')).toBeNull();
+    area()!.value = 'New words';
+    area()!.dispatchEvent(new Event('input'));
+    press('Enter');
+    expect(calls).toEqual([
+      ['beginDrawingEdit', 't'],
+      ['updateDrawing', 't', { style: { text: 'New words' } }],
+      ['endDrawingEdit', 't', { cancel: false }],
+    ]);
+  });
+
+  it('puts an old text’s words back on Escape, or when emptied', () => {
+    const { fake, calls } = setUp();
+    fake.emit('drawingDoubleClick', { id: 't' });
+    press('Escape');
+    fake.emit('drawingDoubleClick', { id: 't' });
+    area()!.value = '   ';
+    press('Enter');
+    expect(calls.filter((c) => c[0] === 'endDrawingEdit')).toEqual([['endDrawingEdit', 't', { cancel: true }], ['endDrawingEdit', 't', { cancel: true }]]);
+    expect(calls.some((c) => c[0] === 'takeBackDrawing')).toBe(false);
+  });
+
+  it('takes a text just drawn back on Escape', async () => {
+    const { fake, calls } = setUp();
+    fake.emit('drawingCreate', { id: 't', type: 'text', drawn: true });
+    window.dispatchEvent(new Event('pointerup'));
+    await new Promise((r) => setTimeout(r, 0));
+    area()!.value = 'Typed';
+    area()!.dispatchEvent(new Event('input'));
+    press('Escape');
+    // Its words went into the step that made it, so taking it back leaves nothing to undo.
+    expect(calls).toEqual([['amendNewDrawing', 't', { style: { text: 'Typed' } }], ['takeBackDrawing', 't']]);
+  });
+
+  it('closes when the text is taken away while it is typed, and ends its edit', () => {
+    const { fake, calls } = setUp();
+    fake.emit('drawingDoubleClick', { id: 't' });
+    fake.emit('drawingRemove', { id: 't' });
+    expect(area()).toBeNull();
+    expect(calls.at(-1)).toEqual(['endDrawingEdit', 't']);
+  });
+
+  it('drops blank lines left at the end of what was typed', () => {
+    const { fake, calls } = setUp();
+    fake.emit('drawingDoubleClick', { id: 't' });
+    area()!.value = 'Line one\n\n';
+    press('Enter');
+    expect(calls).toContainEqual(['updateDrawing', 't', { style: { text: 'Line one' } }]);
+  });
+
+  it('opens no second box over a text already being typed in', () => {
+    const { fake, calls } = setUp();
+    fake.emit('drawingDoubleClick', { id: 't' });
+    area()!.value = 'Half';
+    fake.emit('drawingDoubleClick', { id: 't' });
+    expect(area()!.value).toBe('Half');
+    expect(calls.filter((c) => c[0] === 'beginDrawingEdit')).toHaveLength(1);
+  });
+});

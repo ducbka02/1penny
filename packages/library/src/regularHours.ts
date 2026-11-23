@@ -1,0 +1,35 @@
+import type { SymbolInfo } from '@1penny/commons';
+import { barTimeUnit, isValidTimeZone, sessionMinute, symbolTimeZone } from '@1penny/commons';
+import { isRegularSession } from '@1penny/core';
+
+const DAY_MS = 86_400_000;
+/** Bars looked at to tell the interval (a weekend gap between two of them doesn't fool it). */
+const SPACING_SAMPLE = 10;
+
+/**
+ * Which bar times fall in `info`'s regular hours, for bars like `data`'s
+ * (by the time each bar opens). Null when there is nothing to leave out:
+ * the symbol has no hours or no zone, or the bars are a day or longer.
+ */
+export function regularHoursFilter(
+  info: SymbolInfo | null,
+  data: readonly { time: number }[],
+): ((time: number) => boolean) | null {
+  const zone = symbolTimeZone(info);
+  if (!zone || !isValidTimeZone(zone) || data.length < 2) return null;
+  const windows = (info?.sessions ?? []).flatMap((session) => {
+    const startMinute = sessionMinute(session.start);
+    const endMinute = sessionMinute(session.end);
+    return startMinute === null || endMinute === null ? [] : [{ startMinute, endMinute }];
+  });
+  if (windows.length === 0) return null;
+  const unit = barTimeUnit(data);
+  let spacing = Infinity;
+  for (let i = Math.max(1, data.length - SPACING_SAMPLE); i < data.length; i++) {
+    const gap = (data[i].time - data[i - 1].time) * unit;
+    if (gap > 0 && gap < spacing) spacing = gap;
+  }
+  if (!(spacing < DAY_MS)) return null;
+  const config = { timeZone: zone, windows, startMinute: windows[0].startMinute, endMinute: windows[windows.length - 1].endMinute };
+  return (time) => isRegularSession(time * unit, config);
+}

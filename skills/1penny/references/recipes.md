@@ -1,0 +1,1488 @@
+# PennyChart recipes
+
+Worked examples. Every `ts` block here is type-checked against the library in
+CI (`pnpm docs:check`), so the calls are real.
+
+## Your own data feed: a DataFeed
+
+For a source of your own, a `DataFeed` is the shortest contract: the chart asks
+for bars (`getBars`) and subscribes to live ones (`subscribeBars`), and does the
+paging back, reconnecting, timeframes the feed lacks and resubscribing on a
+switch itself. Give it as `feed` where an adapter would go. One feed serves any
+number of charts (each subscribes on its own), so a grid takes one for all.
+
+```ts
+import { Chart, type DataFeed, type OHLCBar } from '@1penny/chart';
+import { ChartWidget } from '@1penny/chart/widget';
+
+const feed: DataFeed = {
+  name: 'my-api',
+  // The newest `countBack` bars, or the ones before `before` (the oldest bar's
+  // time) when the chart pages back. An empty array means no more.
+  getBars: async ({ symbol, timeframe, countBack, before, signal }): Promise<OHLCBar[]> => {
+    const url = `/api/candles?symbol=${symbol}&tf=${timeframe}&limit=${countBack}&before=${before ?? ''}`;
+    const res = await fetch(url, { signal });
+    return res.json();
+  },
+  subscribeBars: ({ symbol, timeframe }, on) => {
+    const ws = new WebSocket(`wss://example.com/klines/${symbol}/${timeframe}`);
+    ws.onmessage = (m) => {
+      const k: { bar: OHLCBar; closed: boolean } = JSON.parse(m.data);
+      on.bar(k.bar, k.closed);             // the forming bar again, a new one, or its final values
+    };
+    ws.onclose = () => on.connection('disconnected');   // the chart loads and subscribes again
+    return () => ws.close();
+  },
+};
+
+const chart = new Chart(document.getElementById('chart')!, { theme: 'dark' });
+await chart.connect({ feed, symbol: 'AAPL', timeframe: '1h' });
+new ChartWidget(document.getElementById('widget')!, { feed, symbol: 'AAPL' });
+```
+
+The subscriber also has `tick`, `symbolInfo` and `error`; a feed that never
+calls `connection` counts as connected once `subscribeBars` returns. The
+`signal` is aborted when the answer is no longer needed (a switch, a
+disconnect), and what a subscription sends after its unsubscribe is dropped.
+`feedFromAdapter(adapter)` and `adapterFromFeed(feed)` convert between the two
+contracts; a connect given both an adapter and a feed throws.
+
+Bars your app already has go through a `ManualFeed`: it keeps each series and
+sends the bars you push to the charts subscribed to it, so the bars have one
+writer instead of `setData` calls beside a stream.
+
+```ts
+import { Chart, ManualFeed, type OHLCBar } from '@1penny/chart';
+
+declare const chart: Chart;
+declare const history: OHLCBar[];
+declare const forming: OHLCBar;
+
+const feed = new ManualFeed();
+feed.setBars('AAPL', '1d', history);
+await chart.connect({ feed, symbol: 'AAPL', timeframe: '1d' });
+feed.pushBar('AAPL', '1d', forming);          // again as it forms
+feed.pushBar('AAPL', '1d', forming, true);    // closed
+```
+
+## Your own data feed over REST
+
+`PollingAdapter` turns any "give me the last N bars" endpoint into a live feed:
+it loads history, polls, updates the forming bar and closes it on rollover.
+
+```ts
+import { Chart, PollingAdapter, type OHLCBar, type TimeFrame } from '@1penny/chart';
+
+const feed = new PollingAdapter({
+  name: 'my-api',
+  intervalMs: 5_000,
+  fetchBars: async (symbol: string, timeframe: TimeFrame, limit: number): Promise<OHLCBar[]> => {
+    const res = await fetch(`/api/candles?symbol=${symbol}&tf=${timeframe}&limit=${limit}`);
+    const rows: [number, number, number, number, number, number][] = await res.json();
+    return rows.map(([time, open, high, low, close, volume]) => ({ time, open, high, low, close, volume }));
+  },
+});
+
+const chart = new Chart(document.getElementById('chart')!, { theme: 'dark' });
+await chart.connect({ adapter: feed, symbol: 'AAPL', timeframe: '1h', historyLimit: 500 });
+```
+
+## Your own data feed over WebSocket
+
+`WebSocketAdapter` handles connecting, reconnecting and the history request;
+you describe the URL, the subscribe message and how to read a frame.
+
+```ts
+import { Chart, WebSocketAdapter, type OHLCBar } from '@1penny/chart';
+
+interface KlineFrame { t: number; o: string; h: string; l: string; c: string; v: string; final: boolean }
+
+const feed = new WebSocketAdapter({
+  name: 'my-exchange',
+  wsUrl: () => 'wss://stream.example.com/ws',
+  subscribeMessage: ({ symbol, timeframe }) => ({ op: 'subscribe', channel: `kline.${timeframe}.${symbol}` }),
+  fetchHistory: async (symbol, timeframe, limit): Promise<OHLCBar[]> => {
+    const res = await fetch(`https://api.example.com/klines?symbol=${symbol}&interval=${timeframe}&limit=${limit}`);
+    return res.json();
+  },
+  parseMessage: (raw) => {
+    const k = (raw as { kline?: KlineFrame }).kline;
+    if (!k) return null;
+    const bar = { time: k.t, open: +k.o, high: +k.h, low: +k.l, close: +k.c, volume: +k.v };
+    return { bar, closed: k.final };
+  },
+});
+
+const chart = new Chart(document.getElementById('chart')!, {});
+await chart.connect({ adapter: feed, symbol: 'BTCUSDT', timeframe: '1m' });
+```
+
+A frame for a bar already past, with `closed: true` (the venue's final that
+came after the next bar's first frame, or a revision), corrects that bar: the
+chart replaces the bar with its time and computes the indicators again from
+it, the view kept. An older frame still forming is left out. Neither is a
+live price: the adapter makes a tick from a frame's close only for the newest
+bar, the last bar of the history it served counting, so the price line, the
+alerts and the orders stay with the market, also when a feed sends its last
+closed bar again on subscribing. A
+`DataAdapter` of your own that makes ticks from its bars should do the same.
+
+A feed that learns the symbol's details only after connecting (its decimals,
+price step or hours, say on its first message) sends a `symbolInfo` event with
+the `SymbolInfo`, as it sends its other events (`emitEvent('symbolInfo', info)`
+in a subclass of these adapters). The chart applies it: the price scale,
+legend and tags take the symbol's decimals, and so do drawing labels, price
+limits and the widget's data window, alerts list and order ticket; the scale's
+ticks take its price step.
+
+## React, Vue, Svelte
+
+The wrapper packages give a component with reactive props:
+
+```tsx
+import { PennyChart } from '@1penny/react';
+import { BinanceAdapter } from '@1penny/chart';
+
+const adapter = new BinanceAdapter();
+
+export function PriceChart({ symbol }: { symbol: string }) {
+  return (
+    <PennyChart
+      symbol={symbol}
+      timeframe="15m"
+      adapter={adapter}
+      indicators={['rsi', { id: 'ema', params: { period: 50 } }]}
+      onReady={(chart) => chart.setIndicatorValueLabelsVisible(true)}
+      style={{ height: 480 }}
+    />
+  );
+}
+```
+
+`indicators` takes ids or `{ id, params, position }`; one whose inputs change
+is put back with them. With `data` at mount the component shows your bars and
+opens no stream; `stream={false}` never opens one (and closes one it had), so a
+chart mounted before its bars arrive doesn't start the default Binance feed.
+Bars that go on from the last given (the last bar changed, or bars added:
+`setBars((bars) => [...bars, next])`) go in as live ticks, so the view isn't
+reset and alerts follow the price; any other array is a new series. Vue and
+Svelte take the same, and a push onto the same array too. A change to one of
+the last three bars before the forming one (`CORRECTABLE_BARS`), its time the
+same, goes in as `updateBar`, the view kept too: in a new array, and in Vue and
+Svelte in place. A change further back is a new series. `features` follows its
+changes after mount.
+
+`@1penny/vue` and `@1penny/svelte` take the same data props (Vue
+emits `ready` and `crosshairMove` instead of the callback props). To drive the
+widget or a bare `Chart` from a framework, create it in the mount hook on a
+sized element and call `destroy()` in the unmount hook.
+
+## A feed that corrects a closed bar
+
+A venue sends its final for a bar after the next one has started, or revises
+a bar it closed. `updateBar` puts it in place, wherever the bar is: the
+indicators are computed again from it, and the view, the replay and the
+alerts are left as they are. It returns `false` when no loaded bar has that
+time; a new bar is `appendBar`'s.
+
+```ts
+import { Chart, type OHLCBar } from '@1penny/chart';
+
+const chart = new Chart(document.getElementById('chart')!, {});
+const res = await fetch('/api/candles?symbol=AAPL&tf=1h');
+const bars: OHLCBar[] = await res.json();
+chart.setData(bars);
+
+/** A closed bar from your own socket: a new one, the forming one's close, or the final of an older one. */
+function onClosedBar(bar: OHLCBar): boolean {
+  const data = chart.getData();
+  const last = data[data.length - 1];
+  if (!last || bar.time > last.time) chart.appendBar(bar);
+  else if (bar.time === last.time) chart.updateLastBar(bar); // the live price
+  else return chart.updateBar(bar); // false: no loaded bar has bar.time
+  return true;
+}
+
+const corrected: number[] = [];
+chart.on('dataUpdate', (e) => {
+  if (e.payload.kind === 'correction') corrected.push(e.payload.time);
+});
+
+onClosedBar({ time: bars[bars.length - 2].time, open: 101, high: 104, low: 100, close: 103, volume: 1_250 });
+```
+
+Send the bar whole: a missing volume is 0, as with `setData`. The same bar
+sent again computes nothing, so a feed that sends its last closed bars on
+every poll costs nothing for those that didn't change. With a connected feed,
+send the bar again as closed instead (see the WebSocket recipe).
+
+## A signal from an indicator on an indicator
+
+An SMA of RSI, drawn in RSI's pane, and a signal when RSI closes above it.
+It looks at the two last *closed* bars (the forming one still moves) and fires
+once per bar:
+
+```ts
+import { Chart, BinanceAdapter, indicatorSource } from '@1penny/chart';
+
+const chart = new Chart(document.getElementById('chart')!, { theme: 'dark' });
+await chart.connect({ adapter: new BinanceAdapter(), symbol: 'ETHUSDT', timeframe: '15m' });
+
+const rsi = chart.addIndicator('rsi', { period: 14 })!;
+const signal = chart.addIndicator('sma', { period: 9, source: indicatorSource(rsi, 'value') })!;
+
+let lastSignalBar = -1;
+chart.on('indicatorUpdate', () => {
+  const r = chart.getIndicatorOutput(rsi)?.series ?? [];
+  const s = chart.getIndicatorOutput(signal)?.series ?? [];
+  const i = r.length - 2; // the bar that closed last
+  if (i <= lastSignalBar) return;
+  const [r0, r1, s0, s1] = [r[i - 1]?.value, r[i]?.value, s[i - 1]?.value, s[i]?.value];
+  if (r0 === undefined || r1 === undefined || s0 === undefined || s1 === undefined) return;
+  if (r0 <= s0 && r1 > s1) {
+    lastSignalBar = i;
+    console.log('RSI closed above its average');
+  }
+});
+```
+
+## A backtest replayed on the chart
+
+```ts
+import { Chart, type OHLCBar, type SignalMarker, type TradeZone } from '@1penny/chart';
+
+declare const bars: OHLCBar[];            // the whole lookback
+declare const signals: SignalMarker[];    // the backtest's buys and sells
+declare const trades: TradeZone[];        // and its trades
+
+const chart = new Chart(document.getElementById('chart')!, { theme: 'dark' });
+chart.setData(bars);
+chart.setSignalMarkers(signals);
+chart.setTradeZones(trades);
+
+// Sweep the last 30 days in about 3.5 s: only those bars on the chart, each
+// mark appearing as the replay reaches it, each trade open until its exit.
+const DAY = 86_400_000;
+chart.replayStart({ startTime: bars[bars.length - 1].time - 30 * DAY, hideHistory: true, duration: 3500 });
+chart.on('replayStep', (e) => console.log(`${e.payload.barIndex + 1} / ${e.payload.total}`));
+chart.on('replayComplete', () => chart.replayStop());   // the whole series, every mark
+```
+
+`revealMarks: false` shows every mark through the replay. `duration` plays
+several bars a frame when it must; a frame that comes late slows the replay
+rather than skip ahead. The bars before `startTime` come back with
+`replayStop()`.
+
+## Alerts beyond a price level
+
+A line crossing another line, a fast move, a close past a level, and an end
+date. They check on every live price, with the lines they watch taken at
+the same moment: a connected stream's, or your own feed's through
+`updateLastBar`, `appendBar` or `setCurrentPrice`:
+
+```ts
+import { Chart, BinanceAdapter } from '@1penny/chart';
+
+const chart = new Chart(document.getElementById('chart')!, { theme: 'dark' });
+await chart.connect({ adapter: new BinanceAdapter(), symbol: 'BTCUSDT', timeframe: '1h' });
+
+const ema = chart.addIndicator('ema', { period: 50 })!;
+const rsi = chart.addIndicator('rsi', { period: 14 })!;
+
+chart.addAlert(NaN, 'crossingUp', 'above the 50 EMA', 'price', undefined, { target: `${ema}:value` });
+chart.addAlert(NaN, 'movesDown', 'dump', 'price', undefined, { percent: 4, bars: 6 });        // bars: 2–500
+chart.addAlert(70, 'greaterThan', 'RSI closed above 70', `${rsi}:value`, 'RSI', { onBarClose: true });
+chart.addAlert(64_000, 'crossing', 'today only', 'price', undefined, { expiresAt: Date.now() + 86_400_000 });
+
+chart.on('alertTriggered', (e) => console.log(e.payload.message, e.payload.channel, e.payload.target));
+chart.on('alertExpired', (e) => console.log('expired', e.payload.id));
+```
+
+## Practising on a replay with a paper account
+
+Replay an hourly chart with each bar forming along its minutes and trade it on
+paper: orders fill as the drawn price reaches them, and fills land on the
+replayed bars. Alerts keep watching
+the live market meanwhile.
+
+```ts
+import { Chart, BinanceAdapter, PaperExecutionAdapter } from '@1penny/chart';
+
+const adapter = new BinanceAdapter();
+const chart = new Chart(document.getElementById('chart')!, { theme: 'dark' });
+await chart.connect({ adapter, symbol: 'BTCUSDT', timeframe: '1h' });
+chart.connectExecution(new PaperExecutionAdapter(), { brackets: 'place' }); // a confirmed bracket is an order too
+
+// The chart fetches the minutes of the bars it is about to play (not the newest ones).
+chart.replayStart({ animate: true, step: 'auto', startIndex: 300, paused: true, speed: 2 });
+chart.replayResume();
+// … place orders from the chart; chart.replaySeekToBar(i) jumps, chart.replayStop() goes back to live
+```
+
+Switching the interval mid-replay keeps the time: the replay waits for the new
+bars and goes on there, fetching the new interval's finer bars itself. Switching the symbol ends a
+replay the paper account trades, since its orders are of the old symbol.
+
+## Another symbol's change beside yours, in percent
+
+ETH's line on BTC's chart, each reading its change since the first bar on
+screen on a percent price scale, and a legend of your own from
+`getCompareValues` (the widget's `addCompareSymbol` does all of this itself).
+Fetch as many bars as the chart has, so the line starts where the chart does.
+Renko, Kagi, line break, point & figure and range bars draw no compare lines;
+there `getCompareValues` gives each one's latest close and a null change, and
+the indicators that read another symbol (`compareSymbol`, `compareSymbolPane`,
+`spread`, the correlations) are not drawn either, nor those that count days
+(`vwap`, `svwap`, `mtfma`): `getActiveIndicators()` gives
+them `shown: false` and `offChartType: true`. The other indicators are worked
+out on the bricks drawn, so `getIndicatorOutput(id).series` has a point per
+brick there, and `crosshairMove`'s `time` dates a brick as the axis does:
+
+```ts
+import { Chart, BinanceAdapter } from '@1penny/chart';
+
+const adapter = new BinanceAdapter();
+const chart = new Chart(document.getElementById('chart')!, { theme: 'dark' });
+await chart.connect({ adapter, symbol: 'BTCUSDT', timeframe: '1h' });
+
+const eth = await adapter.fetchHistory('ETHUSDT', '1h', chart.getData().length);
+chart.addCompareSymbol('eth', 'ETHUSDT', eth, '#7c4dff');
+chart.setScaleMode('percentage');
+
+const legend = document.getElementById('legend')!;
+chart.on('crosshairMove', (e) => {
+  // Its close at the bar and its change in %, as the line reads; `stale` past its last bar.
+  // Both are null before its first bar: no figures then, not a lone '%'.
+  legend.textContent = chart.getCompareValues(e.payload.barIndex)
+    .map((v) => {
+      const change = v.change === null ? '' : `${v.change.toFixed(2)}%`;
+      return `${v.label} ${v.close ?? ''} ${change}`.trim();
+    })
+    .join('  ');
+});
+```
+
+## Another symbol on its own scale, and the ratio of the two
+
+ETH beside BTC on a price scale of its own, ETH's price again in a pane of its
+own (`compareSymbolPane`; `compareSymbol` stays on the price pane), and BTC ÷ ETH
+in a pane. The
+indicators ask for the bars of the symbol they read; fetch them again when the
+interval changes:
+
+```ts
+import { Chart, BinanceAdapter } from '@1penny/chart';
+
+const adapter = new BinanceAdapter();
+const chart = new Chart(document.getElementById('chart')!, { theme: 'dark' });
+await chart.connect({ adapter, symbol: 'BTCUSDT', timeframe: '1h' });
+
+const load = async (symbol: string) => chart.setSymbolSeries(symbol, await adapter.fetchHistory(symbol, '1h', 1000));
+chart.on('symbolSeriesRequest', (e) => void load(e.payload.symbol));
+
+chart.addIndicator('compareSymbol', { symbol: 'ETHUSDT' }, 'bottom', { scale: 'left' });
+chart.addIndicator('compareSymbolPane', { symbol: 'ETHUSDT' }); // its price in a pane of its own
+const ratio = chart.addIndicator('spread', { symbol: 'ETHUSDT', mode: 'ratio' })!;
+chart.setPaneScale(ratio, { percent: true });
+```
+
+## Prices in 32nds
+
+A bond future quoted in 32nds and half 32nds, on High-Low bars, regular
+session only:
+
+```ts
+import { Chart } from '@1penny/chart';
+
+const chart = new Chart(document.getElementById('chart')!, {
+  chartType: 'hiLo',
+  priceFormat: { denominator: 32, subDenominator: 2 },  // 110'165 = 110 and 16.5/32
+  extendedHours: false,
+});
+chart.setSymbolInfo({ symbol: 'ZN', timeZone: 'America/Chicago', sessions: [{ start: '07:20', end: '14:00' }] });
+```
+
+## A Vietnamese stock, and VN30 futures
+
+HOSE's rules on the chart: steps by price band, the day's ceiling and floor,
+lots of 100 in the order ticket, the price board's colours. Preset prices are
+in thousands of dong, as price boards show them (bars in thousands need
+nothing more); `scaleMarketPrices(MARKET_HOSE, 1000)` reads dong. The axis
+keeps its zone until `setTimeZone('exchange')`, and numbers their locale.
+
+```ts
+import { Chart, MARKET_HOSE, MARKET_VN30F, priceStepAt, vn30fContracts } from '@1penny/chart';
+
+const chart = new Chart(document.getElementById('chart')!, { extendedHours: false, numberLocale: 'vi-VN' });
+chart.setMarket(MARKET_HOSE);
+chart.setTimeZone('exchange');                     // the market's zone: Asia/Ho_Chi_Minh
+chart.setPriceLimits(25.35);                       // the reference: yesterday's close
+console.log(chart.getPriceLimits());               // { ceiling: 27.1, floor: 23.6, reference: 25.35 }
+console.log(chart.roundPrice(25.37), priceStepAt(9.5, MARKET_HOSE)); // 25.35 0.01
+
+// VN30 futures: the front contract and its last trading day
+const [front] = vn30fContracts(Date.now());
+chart.setMarket(MARKET_VN30F);
+console.log(front.symbol, front.lastTradingDay);   // e.g. VN30F2611 2026-11-19
+```
+
+## A Korean stock, and Upbit
+
+KRX's rules (KOSPI, KOSDAQ; `MARKET_NXT` for Nextrade): steps by price band in
+won, ±30% limits rounded as KRX rounds them, red up and blue down. Upbit's
+REST API allows a browser one call in ten seconds: point `restBase` at a proxy.
+With `numberLocale: 'ko-KR'` the legend, the crosshair tooltip, ChartWidget's
+data window and the Date and Price Range box write volumes in 만, 억 and 조 (in a
+widget: `chartOptions: { numberLocale: 'ko-KR' }`).
+
+```ts
+import { Chart, MARKET_KRX, MARKET_UPBIT_KRW, UpbitAdapter, formatVolumeLoc } from '@1penny/chart';
+
+const chart = new Chart(document.getElementById('chart')!, { numberLocale: 'ko-KR' });
+chart.setMarket(MARKET_KRX);
+chart.setTimeZone('exchange');                     // Asia/Seoul
+chart.setPriceLimits(9980);
+console.log(chart.getPriceLimits());               // { ceiling: 12970, floor: 6990, reference: 9980 }
+console.log(formatVolumeLoc(345_000_000, 'ko'));   // 3.45억
+
+// Upbit's KRW market, through a proxy of your own
+chart.setMarket(MARKET_UPBIT_KRW);
+chart.connect({ adapter: new UpbitAdapter({ restBase: '/upbit' }), symbol: 'KRW-BTC', timeframe: '1m' });
+```
+
+## Bars of a day in the exchange's time
+
+The 4H, 1D, 1W and 1M bars the library builds start at the exchange's midnight
+when it knows the zone: for Ho Chi Minh City, 1D at 00:00 there and 4H at 08:00
+and 12:00. Which zone depends on where the bars come from:
+
+- **Timeframes a feed lacks** (built from its `supportedTimeframes`): only the
+  `SymbolInfo.timeZone` its `resolveSymbol` answers. `setMarket` doesn't move
+  them; a feed without `resolveSymbol` (or that fails to answer) gets UTC days,
+  after a failed answer until the chart loads the symbol afresh.
+- **Bars given to `widget.setData`**: the symbol's zone (`setSymbolInfo`), else
+  the market's (`setMarket`).
+
+Bars your own code builds (from trades, or hours into days) should start at the
+same place: `timeframeBucketStart` with the zone. 1h and shorter keep their
+floor on the epoch; daily bars stamped at 00:00 UTC keep their dates.
+
+```ts
+import { resampleBars, timeframeBucketStart, type OHLCBar, type TimeFrame, type Trade } from '@1penny/chart';
+
+const timeZone = 'Asia/Ho_Chi_Minh';
+
+/** The bars with `trade` in them: it starts a bar of `timeframe`, or joins the last one. */
+function withTrade(bars: readonly OHLCBar[], trade: Trade, timeframe: TimeFrame): OHLCBar[] {
+  const time = timeframeBucketStart(trade.time, timeframe, { timeZone });
+  const last = bars[bars.length - 1];
+  if (last?.time !== time) {
+    return [...bars, { time, open: trade.price, high: trade.price, low: trade.price, close: trade.price, volume: trade.volume }];
+  }
+  const merged = { ...last, high: Math.max(last.high, trade.price), low: Math.min(last.low, trade.price), close: trade.price, volume: last.volume + trade.volume };
+  return [...bars.slice(0, -1), merged];
+}
+
+// 09:15 on 23 October there: its 1D bar opens at 17:00 UTC on the 22nd, its 4H bar at 08:00 there.
+const at = Date.UTC(2026, 9, 23, 2, 15);
+console.log(new Date(timeframeBucketStart(at, '1d', { timeZone })).toISOString()); // 2026-10-22T17:00:00.000Z
+console.log(withTrade([], { time: at, price: 1250.5, volume: 3 }, '4h')[0].time === Date.UTC(2026, 9, 23, 1)); // true
+
+// Hours into days and weeks, all at once
+declare const hours: OHLCBar[];
+const days = resampleBars(hours, '1d', { timeZone });
+const weeks = resampleBars(days, '1w', { timeZone });
+```
+
+## The order book on the price chart, display only
+
+`features.depth` draws the book on the plot from the right edge; it needs no orders and works with `trading: false`. `mode: 'level'` shows each price's own size (a wall is one long bar), `'cumulative'` (default) adds the levels away from the market; `markBest` lines the best bid and ask. `rowSize` (in price) adds the levels up into rows that far apart, for a dense book under a coarse scale or a book with gaps; `rowOrigin` sets where those rows start (`-tick / 2` lines them up with a footprint whose cells start at multiples of the row size), else each row is centred on a multiple of `rowSize`. `rightMargin` leaves empty slots for the bars.
+
+```ts
+import { Chart } from '@1penny/chart';
+
+declare const host: HTMLElement;
+declare const orderBook: { bids: { price: number; volume: number }[]; asks: { price: number; volume: number }[] };
+
+const chart = new Chart(host, {
+  features: { trading: false, depth: true },
+  depthOverlay: { mode: 'level', markBest: true, maxWidth: 140 },
+  rightMargin: 14,
+});
+chart.setDepthData(orderBook); // on every book update; null clears it
+chart.setDepthOverlay({ mode: 'cumulative', rowSize: 0.5 }); // rows of 0.5 in price
+```
+
+## Small charts around the chart: a book's depth, an equity curve, a gauge
+
+Every finance chart takes `theme`, `font`, `locale` (a BCP 47 tag for numbers and dates) and `ariaLabel`, and has `setOptions`, `setTheme` and `destroy`. Text is in the system's sans face unless `font` names another.
+
+```ts
+import { DepthChart, EquityCurveChart, WaterfallChart, GaugeChart, SparklineChart, ScatterChart, PerformanceDashboard } from '@1penny/chart';
+
+const el = (id: string) => document.getElementById(id)!;
+
+// An order book's depth: cumulative volume either side of the middle price.
+const depth = new DepthChart(el('depth'), {
+  data: { bids: [{ price: 99.5, volume: 12 }, { price: 99, volume: 30 }], asks: [{ price: 100.5, volume: 9 }, { price: 101, volume: 24 }] },
+  spreadLabel: 'Spread',
+});
+depth.update({ bids: [{ price: 99.5, volume: 14 }], asks: [{ price: 100.5, volume: 7 }] });
+
+// An account's value over time, its falls from a peak shaded, against a benchmark with times of its own.
+new EquityCurveChart(el('equity'), {
+  data: [{ time: Date.UTC(2026, 0, 1), value: 100_000 }, { time: Date.UTC(2026, 1, 1), value: 104_500 }, { time: Date.UTC(2026, 2, 1), value: 102_300 }],
+  benchmark: [{ time: Date.UTC(2026, 0, 1), value: 100_000 }, { time: Date.UTC(2026, 2, 1), value: 101_000 }],
+  benchmarkLabel: 'VN-Index',
+  drawdown: true,
+  fillArea: true,
+  locale: 'vi',
+});
+
+// Fixed values on an equity curve: lines with their values at the axis, and tinted bands under the curve.
+// The value scale widens to show them unless `fitLevels: false`; setOptions changes them in place.
+const priced = new EquityCurveChart(el('structure'), {
+  data: [{ time: Date.UTC(2026, 0, 1), value: 36_000 }, { time: Date.UTC(2026, 5, 1), value: 42_300 }],
+  levels: [{ value: 41_250, label: 'BOS', color: '#e0a030', labelAt: 'start' }, { value: 38_900, label: 'Equilibrium', dash: [] }],
+  bands: [{ from: 38_900, to: 44_100, label: 'Premium', color: 'rgba(232, 80, 91, 0.10)' }],
+});
+priced.setOptions({ levels: [{ value: 42_000, label: 'CHoCH' }] });
+
+// Steps to a total. A bar with no `type` is a step up or down; `total` and `subtotal` start from zero.
+new WaterfallChart(el('pnl'), {
+  data: [{ label: 'Revenue', value: 120 }, { label: 'Costs', value: -45 }, { label: 'Tax', value: -15 }, { label: 'Net', value: 60, type: 'total' }],
+});
+
+// One value against bands.
+const gauge = new GaugeChart(el('risk'), { value: 62, min: 0, max: 100, zones: [{ from: 0, to: 50, color: '#1fa874' }, { from: 50, to: 100, color: '#e8505b' }] });
+gauge.setValue(71);
+
+// A line with no axes, for a table's cell.
+new SparklineChart(el('spark'), { data: [3, 5, 4, 8, 6, 9, 7], mode: 'area', showLastPoint: true });
+
+// Risk against return, one bubble a holding.
+new ScatterChart(el('risk-return'), {
+  series: [{ name: 'Holdings', points: [{ x: 12, y: 8, size: 30, label: 'AAA' }, { x: 20, y: 15, size: 10, label: 'BBB' }] }],
+  xLabel: 'Volatility %',
+  yLabel: 'Return %',
+});
+
+// A backtest's result as a page: stats, equity, drawdown and monthly returns.
+declare const result: ConstructorParameters<typeof PerformanceDashboard>[1]['result'];
+new PerformanceDashboard(el('report'), { result, title: 'Strategy', labels: { equityCurve: 'Equity', monthlyReturns: 'By month' } });
+```
+
+## A dashboard: net flows, allocation and returns
+
+The finance charts take an element and their options, and size themselves to it.
+
+```ts
+import { BarChart, DonutChart, HistogramChart } from '@1penny/chart';
+
+new BarChart(document.getElementById('flows')!, {
+  categories: ['6/10', '7/10', '8/10'],
+  series: [{ name: 'Net', values: [-660, 860, -280] }],
+  colorBySign: true,
+  onBarClick: ({ category, value }) => console.log(category, value),
+});
+
+new DonutChart(document.getElementById('allocation')!, {
+  data: [{ label: 'Stocks', value: 52 }, { label: 'Bonds', value: 23 }, { label: 'Cash', value: 25 }],
+  centerLabel: 'Total',
+  centerValue: '1.2B',
+});
+
+new HistogramChart(document.getElementById('returns')!, {
+  values: [-1.2, 0.4, 0.8, -0.3, 1.5, 0.2],
+  binWidth: 0.5,
+  colorBySign: true,
+  markers: [{ value: 0.23, label: 'Mean' }],
+});
+```
+
+Days on a calendar, correlations in a matrix, and a market map by sector:
+
+```ts
+import { CalendarChart, MatrixChart, HeatmapChart, correlationMatrix } from '@1penny/chart';
+
+new CalendarChart(document.getElementById('sessions')!, {
+  data: [{ date: '2025-01-02', value: 1.2 }, { date: '2025-01-03', value: -0.8 }],
+  weekdays: 5,
+  colorScale: { min: -2, max: 2 },
+  onDayClick: (day) => console.log(day.date, day.value),
+});
+
+// Daily returns (not prices), one array per stock, the same days in each.
+const returns = [[0.4, -1.1, 0.8, 0.2], [0.6, -0.9, 1.1, -0.1], [-0.2, 0.5, -0.4, 0.3]];
+new MatrixChart(document.getElementById('correlation')!, {
+  rows: ['VCB', 'BID', 'HPG'],
+  values: correlationMatrix(returns),
+  triangle: 'lower',
+  colorScale: { min: -1, max: 1 },
+});
+
+// A few columns in a wide panel: 'fill' spreads them over the width (a number sets px a column).
+new MatrixChart(document.getElementById('statement')!, {
+  rows: ['Total assets', 'Current assets'],
+  columns: ['2026Q1', '2026Q2', '2026Q3'],
+  values: [[1.1, -0.4, 2.3], [4, 6.5, 10]],
+  valueFormat: (v) => `${v.toFixed(1)}%`,
+  cellWidth: 'fill',
+});
+
+new HeatmapChart(document.getElementById('sectors')!, {
+  data: [
+    { id: 'vcb', label: 'VCB', value: 0.8, weight: 480, group: 'Banks' },
+    { id: 'hpg', label: 'HPG', value: 1.9, weight: 160, group: 'Steel' },
+  ],
+  grouped: true,
+});
+```
+
+Price against volume as a counter-clock cycle, and indicators from Asian price boards:
+
+```ts
+import { Chart, CounterClockChart } from '@1penny/chart';
+import type { OHLCBar } from '@1penny/chart';
+
+declare const bars: OHLCBar[];
+declare const chart: Chart;
+
+const clock = new CounterClockChart(document.getElementById('clock')!, { data: bars, period: 25, points: 120 });
+console.log(clock.getPhase()); // 1–8, counter-clockwise from volume rising
+
+chart.addIndicator('psy', { period: 10 }, 'bottom');
+chart.addIndicator('vr', { period: 20 }, 'bottom');
+chart.addIndicator('rainbow', { first: 10, step: 10, count: 10 });
+```
+
+Candlestick patterns, on the chart or as data:
+
+```ts
+import { Chart, detectCandlePatterns } from '@1penny/chart';
+import type { OHLCBar } from '@1penny/chart';
+
+declare const bars: OHLCBar[];
+declare const chart: Chart;
+
+chart.addIndicator('candlepatterns'); // arrows and short names on the bars that end a pattern
+for (const m of detectCandlePatterns(bars, { patterns: ['bullishEngulfing', 'hammer', 'morningStar'] })) {
+  console.log(new Date(m.time).toISOString(), m.pattern.name, m.pattern.direction);
+}
+```
+
+On a page that draws no chart (a scanner, a screener), import the detector from
+`@1penny/core/patterns`: a few kB in a chunk of its own, without the chart's
+engine, even when other pages of the app draw charts. Add `@1penny/core` to
+the app's dependencies first (`@1penny/chart` brings it, but a strict
+installer such as pnpm only lets the app import what it lists).
+
+```ts
+import { detectCandlePatterns, CANDLE_PATTERNS } from '@1penny/core/patterns';
+import type { OHLCBar } from '@1penny/chart';
+
+declare const bars: OHLCBar[];
+
+const bullish = detectCandlePatterns(bars).filter((m) => m.pattern.direction === 'bullish');
+console.log(bullish.length, 'of', CANDLE_PATTERNS.length, 'patterns known');
+```
+
+## A custom indicator
+
+The short way is `defineIndicator`: its inputs, how its lines look, and one
+function that returns the lines from the bars. `ta` has the sums indicators
+are made of, each taking a value a bar and returning one: `sma`, `ema`,
+`wma`, `rma`, `stdev`, `highest`, `lowest`, `change`, `rsi`, `macd`
+(`{ macd, signal, histogram }`), `atr` (of the bars), `bollinger`
+(`{ upper, middle, lower }`), `crossover` and `crossunder` (true on the bars
+of a cross). `rsi`, `macd`, `atr` and `bollinger` run the built-in indicators,
+and `ta.indicator(id, input, params)` runs any of them and returns its lines
+by key, typed by the id: `ta.indicator('stochastic', bars, { kPeriod: 14 }).k`.
+Its input is the bars, or a value a bar the indicator reads as its prices
+(`ta.indicator('ema', rsi, { period: 5 }).value`); an indicator of volume or
+of sessions (OBV, MFI, VWAP…) wants the bars.
+
+```ts
+import { Chart, defineIndicator } from '@1penny/chart';
+
+const emaCross = defineIndicator({
+  id: 'emaCross',
+  name: 'EMA Crossover',
+  placement: 'overlay', // on the prices; 'panel' (the default) is a pane of its own
+  inputs: {
+    fast: { default: 9, kind: 'int', min: 1 },
+    slow: { default: 21, kind: 'int', min: 2 },
+  },
+  plots: [
+    { key: 'fast', title: 'Fast', color: 0 },
+    { key: 'slow', title: 'Slow', color: 1 },
+    { key: 'buy', title: 'Buy', color: 2, kind: 'markers', shape: 'arrowUp', position: 'belowBar' },
+    { key: 'sell', title: 'Sell', color: 3, kind: 'markers', shape: 'arrowDown', position: 'aboveBar' },
+  ],
+  calculate({ bars, inputs, ta }) {
+    const fast = ta.ema(bars.close, inputs.fast); // inputs.fast is a number: typed from its default
+    const slow = ta.ema(bars.close, inputs.slow);
+    return { fast, slow, buy: ta.crossover(fast, slow), sell: ta.crossunder(fast, slow) };
+  },
+});
+
+const cross = new Chart(document.getElementById('chart')!, {});
+cross.registerIndicator(emaCross);
+cross.addIndicator('emaCross', { fast: 12 });
+```
+
+A line is a value a bar (`undefined`, `null` or `NaN` where there is none).
+`true` marks a bar for a `'markers'` plot of an overlay: above or below the
+bar by its `position`, else at the bar's close; in a pane of its own a mark
+is the number it is drawn at. `calculate` gets each number input within its
+`min` and `max` (whole for `kind: 'int'`). Leave `plots` out and every line
+returned is drawn as a line (declare them when `calculate` returns nothing
+for too few bars). `fills`, `scale`,
+`levels`, `category` and `shortName` are the descriptor's, described below.
+It computes over all the bars on each tick, which is quick for sums like
+these; for a long history with a heavy sum, or drawing of your own, write the
+class:
+
+Extend `IndicatorBase` and declare what it draws (`plots`), its pane scale and
+levels; the chart then draws it, scales its pane, labels its values and lists
+it in the widget legend and settings with no rendering code of yours.
+
+```ts
+import { Chart, IndicatorBase, IndicatorValueMap } from '@1penny/chart';
+import type { DataSeries, IndicatorConfig, IndicatorDescriptor, IndicatorOutput, IndicatorValue } from '@1penny/chart';
+
+/** Where the close sits in the last `period` bars' range, 0–100. */
+class RangePosition extends IndicatorBase {
+  descriptor: IndicatorDescriptor = {
+    id: 'rangePosition',
+    name: 'Range Position',
+    shortName: 'RP',
+    placement: 'panel',
+    category: 'oscillators', // its group in ChartWidget's Indicators dialog
+    defaultConfig: { period: 20 },
+    inputs: { period: { kind: 'int', min: 2, max: 500 } },
+    plots: [{ key: 'value', title: 'RP', color: 0 }],
+    scale: { min: 0, max: 100 },
+    levels: [20, 80],
+  };
+
+  calculate(data: DataSeries, config: IndicatorConfig): IndicatorOutput {
+    const period = Math.max(2, Number(config.params.period) || 20);
+    const values = new IndicatorValueMap();
+    const series: (IndicatorValue | null)[] = new Array(data.length).fill(null);
+    for (let i = period - 1; i < data.length; i++) {
+      let hi = -Infinity;
+      let lo = Infinity;
+      for (let j = i - period + 1; j <= i; j++) {
+        hi = Math.max(hi, data[j].high);
+        lo = Math.min(lo, data[j].low);
+      }
+      const point = { value: hi > lo ? ((data[i].close - lo) / (hi - lo)) * 100 : 50 };
+      values.set(data[i].time, point);
+      series[i] = point;
+    }
+    return { values, series };
+  }
+}
+
+const chart = new Chart(document.getElementById('chart')!, {});
+chart.registerIndicator(new RangePosition());
+chart.addIndicator('rangePosition', { period: 30 });
+```
+
+Declare `inputs: { source: { source: true } }` and read `data[i].close` to let
+users run it on another price or another indicator's line.
+
+Give each number input a `kind` (`'int'` for a period, `'number'` for a
+multiplier) and the `min`, `max` and `step` your code takes: the settings
+dialog bounds and steps its field by them and rounds an `'int'` as it is typed,
+so declare the lowest value your `calculate` really uses (a period your code
+raises to 2 is `min: 2`). `describeInputs(descriptor)` lists the inputs as the
+dialog reads them.
+
+A choice lists its values in `options`; give each a label in your app's
+language as `{ value, label }` (a plain value shows as it is), and the dialog
+shows the label and hands your `calculate` the value:
+
+```ts
+import type { IndicatorInputSpec } from '@1penny/chart';
+
+const type: IndicatorInputSpec = {
+  kind: 'choice',
+  options: [{ value: 'ema', label: 'Exponential' }, { value: 'sma', label: 'Simple' }],
+};
+```
+
+A band or channel needs no `render` of yours either: declare its shading and
+each line's look, and the chart draws them, the settings dialog shows and
+restores a declared dash, and zoomed far out the fill goes a pixel column at a
+time like the built-ins'.
+
+```ts
+import type { IndicatorDescriptor } from '@1penny/chart';
+
+const channelLook: Pick<IndicatorDescriptor, 'plots' | 'fills'> = {
+  plots: [
+    { key: 'upper', title: 'Upper', color: 0 },
+    // width: kept at 1 whatever the indicator's width; lineStyle: dashed until its style says otherwise
+    { key: 'middle', title: 'Basis', color: 1, width: 1, lineStyle: 'dashed' },
+    { key: 'lower', title: 'Lower', color: 0 },
+  ],
+  // Shaded under the lines, where both have a value
+  fills: [{ between: ['upper', 'lower'], color: 0, opacity: 0.1 }],
+};
+```
+
+A plot's `opacity` sets it back (bands around a line), and `breakOn: 'session'`
+breaks its line where that output field changes, as VWAP does each session.
+
+To mark some bars (where a line turns, a signal), give them a field and a
+plot of `kind: 'markers'`; leave the field unset on the bars without a mark.
+It is drawn as a shape, at the value or above or below the bar on the price
+pane, and is not a value: no legend value, no axis tag, no export column.
+Not `'dots'`, which is a line and gets all of those.
+
+```ts
+import type { IndicatorPlot } from '@1penny/chart';
+
+const turnPlots: IndicatorPlot[] = [
+  { key: 'value', title: 'MACD', color: 0 },
+  { key: 'turn', title: 'Turn', color: 1, kind: 'markers', shape: 'triangleUp', position: 'belowBar' },
+];
+```
+
+A mark is as wide as the bars allow (4 to 8 px). Its style gives another
+shape and a size in pixels, for a built-in such as Williams Fractals too:
+
+```ts
+import type { Chart } from '@1penny/chart';
+
+function biggerFractals(chart: Chart): void {
+  const fractals = chart.addIndicator('fractals', { period: 2 });
+  if (fractals) chart.updateIndicatorStyle(fractals, { plots: { up: { shape: 'arrowUp', size: 14 }, down: { size: 14 } } });
+}
+```
+
+An indicator that starts again each day, week or month reads the exchange's
+IANA zone as `config.exchangeTimeZone`: the chart sets it from the symbol's
+`timeZone`, else the market's (`setSymbolInfo`, `setMarket`), and leaves it
+unset for UTC. Count days on that clock, not the zone the chart shows, so the
+values stay the same whatever `setTimeZone` displays. A new zone computes again
+only the indicators that read it and those that read their lines; one of yours
+that reads no zone can say `readsExchangeTimeZone: false` in its descriptor.
+
+### Live ticks: `update` and `revisesBefore`
+
+On each tick only the newest bar changes. Without `update`, the chart runs
+`calculate` over the whole history again; with it, the chart hands back your
+last output (`prev`) and the first bar that changed (`from`), and you
+recompute from there. Return `null` to have `calculate` run instead. The
+values must be the ones `calculate` would give. `canResume` and `writePoint`
+(from `IndicatorBase`) check that `prev` still fits the bars and write a bar
+into both `series` and `values`.
+
+`from` is always the first bar that changed. When a new bar can change a bar
+before it (a swing high is known only once `n` bars after it are in), your
+`update` rewrites back from `from - n` itself, and `revisesBefore` returns that
+`n`, so the indicators that read this one's line are recomputed from there too.
+
+```ts
+import { IndicatorBase, IndicatorValueMap } from '@1penny/chart';
+import type { DataSeries, IndicatorConfig, IndicatorDescriptor, IndicatorOutput, IndicatorValue } from '@1penny/chart';
+
+/** A swing high: the bar `strength` bars back is higher than the `strength` bars either side of it. */
+class SwingHighs extends IndicatorBase {
+  descriptor: IndicatorDescriptor = {
+    id: 'swingHighs',
+    name: 'Swing Highs',
+    placement: 'overlay',
+    defaultConfig: { strength: 2 },
+    inputs: { strength: { kind: 'int', min: 1, max: 20 } },
+    plots: [{ key: 'high', title: 'Swing high', color: 0, kind: 'markers', shape: 'triangleDown', position: 'aboveBar' }],
+  };
+
+  private point(data: DataSeries, i: number, n: number): IndicatorValue | null {
+    if (i < n || i + n >= data.length) return null;
+    for (let k = 1; k <= n; k++) {
+      if (data[i - k].high >= data[i].high || data[i + k].high > data[i].high) return null;
+    }
+    return { high: data[i].high };
+  }
+
+  calculate(data: DataSeries, config: IndicatorConfig): IndicatorOutput {
+    const n = Number(config.params.strength) || 2;
+    const out: IndicatorOutput = { values: new IndicatorValueMap(), series: new Array(data.length).fill(null) };
+    for (let i = 0; i < data.length; i++) this.writePoint(out, data, i, this.point(data, i, n));
+    return out;
+  }
+
+  // A new bar decides the bar `strength` back: update rewrites that far, and says so here.
+  revisesBefore(config: IndicatorConfig): number {
+    return Number(config.params.strength) || 2;
+  }
+
+  update(data: DataSeries, config: IndicatorConfig, prev: IndicatorOutput, from: number): IndicatorOutput | null {
+    if (!this.canResume(data, prev, from)) return null;
+    const n = Number(config.params.strength) || 2;
+    for (let i = Math.max(0, from - n); i < data.length; i++) this.writePoint(prev, data, i, this.point(data, i, n));
+    return prev;
+  }
+}
+
+export const swingHighs = new SwingHighs();
+```
+
+### Drawing more than its plots
+
+`IndicatorBase.render` draws the descriptor's `plots` and `fills`. Override
+it to draw more, and call it first. The fifth argument holds the theme the
+chart draws with, for colours and a font the style doesn't give. A mark on
+some bars needs no `render` of yours: a `markers` plot draws it.
+
+```ts
+import { IndicatorBase, barIndexToX, priceToY } from '@1penny/chart';
+import type { IndicatorOutput, IndicatorRenderContext, ResolvedIndicatorStyle, ViewportState } from '@1penny/chart';
+
+/** Its last value written beside it, in the theme's text colour and font. */
+export abstract class LabelledLast extends IndicatorBase {
+  render(ctx: CanvasRenderingContext2D, output: IndicatorOutput, viewport: ViewportState, style: ResolvedIndicatorStyle, context: IndicatorRenderContext): void {
+    super.render(ctx, output, viewport, style, context);
+    const series = output.series ?? [];
+    const last = series.length - 1;
+    const value = series[last]?.value;
+    if (value === undefined || last > viewport.visibleRange.to) return;
+    ctx.fillStyle = context.theme.text;
+    ctx.font = `${context.theme.font.sizeSmall}px ${context.theme.font.family}`;
+    ctx.fillText(value.toFixed(2), barIndexToX(last, viewport) + 6, priceToY(value, viewport));
+  }
+}
+
+```
+
+### Its colours in each theme
+
+`defaultStyle` is the look an indicator starts with: a style, or a function of
+the theme. An instance on it follows `chart.setTheme()`, a colour someone picks
+stays, and the viewer's own saved default (`chart.setIndicatorDefaults`, the
+widget's *Save as default*) comes first. A saved layout leaves the theme's
+colours out, so it opens in the colours of the theme it is shown in.
+
+```ts
+import type { IndicatorDescriptor, Theme } from '@1penny/chart';
+
+const themedLook: Pick<IndicatorDescriptor, 'defaultStyle'> = {
+  defaultStyle: (theme: Theme) => ({ colors: theme.name === 'light' ? ['#1f4e8c'] : ['#8ab4f8'], lineWidths: [2] }),
+};
+```
+
+### Registered before a saved layout is read
+
+A saved layout names indicators by id: one that isn't registered when the
+layout is read is left out. Give a `ChartWidget` your indicators in `plugins`,
+and they are registered before it restores a layout (`persistLayouts`), a
+template or a shared view. On a `Chart`, pass `plugins` to the constructor, or
+call `chart.registerIndicator()` before `loadState`.
+
+```ts
+import { MockAdapter } from '@1penny/chart';
+import type { IndicatorPlugin } from '@1penny/chart';
+import { ChartWidget } from '@1penny/chart/widget';
+
+declare const myIndicator: IndicatorPlugin;
+
+new ChartWidget(document.getElementById('chart')!, {
+  symbol: 'BTCUSDT',
+  adapter: new MockAdapter({ basePrice: 64_000 }),
+  persistLayouts: true,
+  plugins: [{ kind: 'indicator', plugin: myIndicator }],
+});
+```
+
+### What the chart reads off the descriptor
+
+- **The legend** names it by `shortName` and the inputs that differ from
+  `defaultConfig`, and shows the value of each plot that is not `markers`, in
+  its colour.
+- **The price axis** tags the latest value of those same plots.
+- **The CSV export** (`chart.getExportData`) has a column for each of them,
+  named by the legend's name and, when there is more than one, the plot's
+  `title`.
+- **The settings dialog** edits `inputs` (by `kind`, with `label`, limits and
+  labelled `options`), and lists each plot in the Style tab with its colour and
+  whether it shows, and a dash for a `line` or `step`. It edits `levels` too.
+- **The Indicators dialog** lists it under `category`, by `name`. A `category`
+  of `{ id, label }` is a group of your own: the indicators with that `id` are
+  listed together under `label`, before the built-in kinds, and a search for
+  the label finds them.
+- **Another indicator** can read its lines, the same plots, as a source.
+
+```ts
+import type { IndicatorDescriptor, IndicatorGroup } from '@1penny/chart';
+
+/** Every indicator of the app's in one group of the Indicators dialog, listed first. */
+const MY_APP: IndicatorGroup = { id: 'my-app', label: 'My App' };
+
+export const flow: IndicatorDescriptor = {
+  id: 'my-flow', name: 'Order Flow', placement: 'panel', category: MY_APP,
+  defaultConfig: {}, plots: [{ key: 'value', title: 'Flow', color: 0 }],
+};
+```
+
+## An overlay of your own, on the price grid
+
+An overlay plugin draws on a layer each frame. `overlayScale(context)` places
+bars by time or index and prices by value exactly where the chart draws them
+(log and inverted scales too); `chart.getPriceStep()` is the symbol's price
+step, for rows on its grid.
+
+```ts
+import { Chart, overlayScale } from '@1penny/chart';
+import type { OverlayPlugin } from '@1penny/chart';
+
+const chart = new Chart(document.getElementById('chart')!, {});
+
+/** A band one price step high around each bar's close. */
+const closeBands: OverlayPlugin = {
+  descriptor: { id: 'closeBands', name: 'Close bands', layer: 'main' },
+  render(ctx, context) {
+    const s = overlayScale(context);
+    const step = chart.getPriceStep();
+    ctx.fillStyle = 'rgba(242, 169, 59, 0.35)';
+    for (let i = s.visible.from; i <= s.visible.to; i++) {
+      const close = chart.roundPrice(context.data[i].close);
+      const top = s.priceToY(close + step / 2);
+      const bottom = s.priceToY(close - step / 2);
+      ctx.fillRect(s.indexToX(i) - s.barWidth / 2, Math.min(top, bottom), s.barWidth, Math.abs(bottom - top));
+    }
+  },
+};
+chart.plugins.register({ kind: 'overlay', plugin: closeBands });
+
+// A switch of the overlay's own: hide it without unregistering, and show the
+// change at once, even with no tick coming to redraw the chart.
+closeBands.enabled = false;
+chart.requestRender();
+```
+
+An indicator's own `render` gets the viewport alone: `priceToY`, `barIndexToX`,
+`timeToX` and their inverses are exported for it.
+
+## A long history: indicators computed in a worker
+
+With hundreds of thousands of bars, computing every indicator again (on
+`setData`, a new indicator, new parameters) holds the main thread for a few
+hundred milliseconds. `indicatorWorker: 'auto'` sends those recomputes to a
+Web Worker the package ships, from 50,000 bars on; nothing to serve or
+configure. Live ticks stay incremental on the main thread.
+
+```ts
+import { Chart, type OHLCBar } from '@1penny/chart';
+import { ChartWidget } from '@1penny/chart/widget';
+
+const history: OHLCBar[] = await fetch('/api/bars?symbol=BTCUSDT&tf=1m').then((r) => r.json());
+
+const chart = new Chart(document.getElementById('chart')!, { indicatorWorker: 'auto' });
+chart.setData(history);
+const rsi = chart.addIndicator('rsi', { period: 14 })!;
+
+// Until the worker answers, the previous values stay drawn: after a new symbol,
+// the previous series' lines; none for an indicator just added.
+// { drawn: true } reads those without waiting: for a legend under the pointer.
+const legend = document.getElementById('legend')!;
+chart.on('indicatorUpdate', () => {
+  const drawn = chart.getIndicatorOutput(rsi, { drawn: true })?.series;
+  legend.textContent = drawn?.at(-1)?.value?.toFixed(2) ?? '';
+});
+
+// A plain read is never out of date: what is still in the worker is computed here first.
+const latest = chart.getIndicatorOutput(rsi)?.series?.at(-1)?.value;
+
+// The widget passes it on to its chart.
+new ChartWidget(document.getElementById('widget')!, { chartOptions: { indicatorWorker: 'auto' } });
+```
+
+Indicators reading another indicator's line or another symbol, and those
+registered with `registerIndicator`, are computed on the main thread. Where
+workers can't run (SSR, jsdom, a Content Security Policy refusing `blob:`
+workers), everything is.
+
+## Several charts in a grid
+
+```ts
+import { ChartGrid, BinanceAdapter } from '@1penny/chart';
+
+const grid = new ChartGrid(document.getElementById('grid')!, {
+  layout: '2x2',
+  syncCrosshair: true,
+  syncTimeAxis: true,
+});
+// An adapter keeps one stream: each chart needs its own.
+await grid.connectAll(() => new BinanceAdapter(), ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT'], '5m');
+grid.getChart(0)?.addIndicator('ema', { period: 50 });
+```
+
+With the full widget on each chart, `ChartWidgetGrid` adds a bar to pick the
+arrangement and the sync, and saves the whole grid as a named layout.
+
+Both grids take the same layouts. Plain ones are rows × columns: `'1x1'`,
+`'1x2'` (one row of two), `'2x1'`, `'1x3'`, `'3x1'`, `'2x2'`, `'1x4'`, `'4x1'`,
+`'2x3'`, `'3x2'`, `'2x4'`, `'3x3'`. The others have one large chart: `'1+2'`
+and `'1+3'` (large on the left), `'2+1'` (large on the right), `'1/2'` and
+`'1/3'` (large on top), `'2/1'` (wide at the bottom). The large chart is the
+first, except in `'2+1'` and `'2/1'`, where it is the last. `GRID_SHAPES`
+gives each layout's `cols`, `rows` and `areas`; `layoutChoices` narrows the
+widget grid's picker.
+
+```ts
+import { ChartWidgetGrid } from '@1penny/chart/widget';
+import { BinanceAdapter } from '@1penny/chart';
+
+const workspace = new ChartWidgetGrid(document.getElementById('grid')!, {
+  layout: '1+2',                         // one large on the left, two beside it
+  layoutChoices: ['1x2', '1+2', '2x2', '1/3'],
+  adapter: () => new BinanceAdapter(),   // one per chart
+  cells: [{ symbol: 'BTCUSDT' }, { symbol: 'ETHUSDT', timeframe: '1h' }, { symbol: 'SOLUSDT' }],
+  sync: { crosshair: true, interval: true },
+});
+workspace.getActiveWidget().getChart().addIndicator('rsi', { period: 14 });
+```
+
+## Named layouts on your own server
+
+```ts
+import { ChartWidget, type LayoutStorage, type SavedLayout } from '@1penny/chart/widget';
+
+const server: LayoutStorage = {
+  list: async () => (await fetch('/api/layouts')).json(),
+  load: async (id) => {
+    const res = await fetch(`/api/layouts/${encodeURIComponent(id)}`);
+    return res.ok ? ((await res.json()) as SavedLayout) : null;
+  },
+  save: async (layout) => {
+    await fetch(`/api/layouts/${encodeURIComponent(layout.id)}`, { method: 'PUT', body: JSON.stringify(layout) });
+  },
+  remove: async (id) => {
+    await fetch(`/api/layouts/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  },
+};
+
+const widget = new ChartWidget(document.getElementById('chart')!, {
+  symbol: 'BTCUSDT',
+  layouts: { storage: server, openLast: true },   // Ctrl/Cmd+S saves, the open layout auto-saves
+});
+await widget.getLayoutSession()?.saveAs('Swing BTC');
+```
+
+Treat what the server returns as untrusted: the widget refuses content it
+cannot read, but your API should still check who owns a layout.
+
+## The widget, saved per symbol and in Vietnamese
+
+```ts
+import { ChartWidget } from '@1penny/chart/widget';
+import { BinanceAdapter } from '@1penny/chart';
+
+new ChartWidget(document.getElementById('chart')!, {
+  adapter: new BinanceAdapter(),
+  symbol: 'BTCUSDT',
+  symbols: ['BTCUSDT', 'ETHUSDT', 'SOLUSDT'],
+  persistLayouts: true,            // indicators, drawings and chart type per symbol, in localStorage
+  persistSettings: true,           // the Chart Settings (overlays, crosshair, time zone…), in localStorage
+  locale: 'vi',
+  chartOptions: { numberLocale: 'vi-VN' },
+});
+```
+
+## The widget's Chart Settings, kept on your server
+
+`persistSettings` keeps them in one browser. To follow the user from device to
+device, read them on each change and give them back on the next visit; the
+widget checks what it is given.
+
+```ts
+import { ChartWidget, type ChartSettingsState } from '@1penny/chart/widget';
+
+const saved = (await (await fetch('/api/me/chart-settings')).json()) as Partial<ChartSettingsState>;
+
+const widget = new ChartWidget(document.getElementById('chart')!, { symbol: 'BTCUSDT' });
+widget.setSettings(saved);   // right after the constructor: before the first paint
+
+const stop = widget.onSettingsChange((settings) => {
+  void fetch('/api/me/chart-settings', { method: 'PUT', body: JSON.stringify(settings) });
+});
+// stop() when the page goes; widget.destroy() also ends it.
+```
+
+After a drag on the price axis, what `onSettingsChange` gives has auto-scale
+off. `setSettings` leaves auto-scale on until the chart has bars (off holds
+the price range on screen, and there is none before them), so given back right
+after the constructor the saved settings open with the bars fitted and
+following the price. Auto-scale off, by any way, still fits each new series
+once (the first bars, a symbol or timeframe switch), then holds that range.
+
+Change them in code with `widget.setSettings({ timezone: 'exchange' })`, not
+`widget.getChart().setTimeZone(…)`: the widget's clock follows its own
+settings, and a change made on the chart itself is told to no listener.
+
+## The symbol search with names, kinds, exchanges and logos
+
+Give `symbols` as `SymbolInfo` and the search opens with each symbol's
+name, kind, exchange and logo, with tabs for the kinds and, from two
+exchanges on, a list to keep to one. A plain ticker still works beside them.
+Without a `searchSymbols` (the option, or the adapter's), typing finds them
+by ticker and by name.
+
+```ts
+import { ChartWidget } from '@1penny/chart/widget';
+import type { SymbolInfo } from '@1penny/chart';
+
+const markets: SymbolInfo[] = [
+  { symbol: 'VCB', description: 'Vietcombank', type: 'stock', exchange: 'HOSE', logo: '/logos/vcb.svg' },
+  { symbol: 'SHB', description: 'SHB Bank', type: 'stock', exchange: 'HNX' },
+  { symbol: 'VN30F2511', description: 'VN30 futures, Nov 2025', type: 'futures', exchange: 'HNX' },
+];
+
+const widget = new ChartWidget(document.getElementById('chart')!, {
+  symbols: [...markets, 'FPT'],   // a ticker alone shows its first letter, no name
+  // A watchlist of its own: without `lists`, setSymbols below would replace it with every symbol given.
+  watchlist: { lists: [{ id: 'main', name: 'Main', symbols: ['VCB', 'FPT'] }] },
+});
+
+// A longer list from your server later: the search opens with it, the watchlist stays.
+const more: SymbolInfo[] = await fetch('/api/markets').then((r) => r.json());
+widget.setSymbols(more);
+```
+
+- A feed's search results (`searchSymbols`) win over these words field by
+  field, on the list the search opens with too once a search told of a
+  symbol; the logo you gave stays. A `null`, a number or a blank where a word
+  goes (a JSON feed's) counts as not given: it neither shows nor erases yours.
+- The chart's own info for its symbol (`resolveSymbol`, `chart.setSymbolInfo`)
+  names the toolbar's symbol and the info panel first, in whatever spelling
+  the feed answers with, once it is set after the symbol changed; a blank or a
+  number there doesn't erase your words either. In the search it gives only a
+  name or a logo the list lacks: its kind and exchange (`'stock'` where your
+  list says `'Cổ phiếu'`, a broker) add no tab and no exchange to pick.
+- `pricePrecision`, `minTick`, `sessions`, `delayMinutes` given here never reach the chart:
+  give those through the adapter's `resolveSymbol` or `chart.setSymbolInfo`.
+- `last` (a number, or text written as it is) and `changePercent` (1.5 is
+  +1.50%) show as two columns at the end of a row, the change in the up or
+  down colour, when any row listed has one. The widget fetches none: fill them
+  from your own quotes, here or in `searchSymbols`' results. A search's
+  figures are not kept for the next opening.
+- `logo` takes `https:`/`http:` addresses, paths on your site, `blob:` and
+  `data:image/png|jpeg|gif|webp|avif|svg+xml`; it is loaded as an image only,
+  with no referrer (allow its host in your CSP's `img-src`). Anything else, or
+  a logo that fails to load, shows the ticker's first letter in its kind's colour.
+- The colours go by the kind's words: stock, futures, index, crypto
+  (perpetuals too) and forex, in English, Vietnamese, Japanese, Chinese or
+  Korean; a warrant takes the futures' colour, a fund or an ETF the index's, a
+  bond the forex's; another kind gets one by its words. Set
+  `--1p-kind-1` … `--1p-kind-5` to recolour them.
+- The kind and exchange filters narrow the rows the search returned (an
+  adapter's search is asked for 50; a `searchSymbols` of yours gives what it
+  gives); they do not ask the feed again. The list shows the best 200 rows,
+  with a line under them saying how many more typing would narrow.
+
+## The widget in a look of your own
+
+```ts
+import { ChartWidget, WIDGET_UI_PRESETS } from '@1penny/chart/widget';
+import { BinanceAdapter } from '@1penny/chart';
+
+// 'print' (the default: paper and ink, kept to the golden ratio), 'studio' (rounded),
+// 'terminal' (dense, square), 'capsule' (pills, floating bars) or 'desk' (Tahoma, a desktop platform's window)
+const widget = new ChartWidget(document.getElementById('chart')!, {
+  adapter: new BinanceAdapter(),
+  symbol: 'BTCUSDT',
+  ui: 'terminal',
+});
+
+// Your theme over a preset: what you leave out stays the preset's.
+widget.setUI({
+  preset: 'studio',
+  radius: { md: 10, lg: 14 },   // buttons and fields take md, menus and panels lg
+  density: 'compact',           // compact · classic (as before 2.0) · comfortable · spacious · airy
+  font: { family: "'Manrope', system-ui, sans-serif", labelCase: 'uppercase' },
+  toolbar: 'floating',
+  active: 'solid',              // tint · solid · underline
+  tagRadius: 999,               // pill price tags on the chart
+  iconStroke: 1,                // icon lines, CSS px at every size (0: as drawn)
+});
+console.log(widget.getUI().sizes.control, WIDGET_UI_PRESETS.capsule.components.control);
+```
+
+The look changes shapes and sizes only; colours stay with `theme`, but for
+Modern's, the default: it brings a code editor's dark and light, on the chart
+too (`MODERN_DARK_THEME`, `MODERN_LIGHT_THEME`) unless `theme` is an object.
+`ui: 'print'` gives back the look and colours the widget had before. Print
+keeps to the golden ratio: sizes in half steps of φ (20, 26, 33, 42, 53),
+Fibonacci spacing and corners, type a third of φ apart (11, 13, 15, 18, 21);
+`PHI`, `FIBONACCI` and `phiStep` from `@1penny/commons` do the same for
+yours. The widget loads no fonts, so load the families a look names (Print
+names system faces only; Modern names Geist, then the system's). Without `ui` the
+look's CSS variables (`--1p-radius`, `--1p-control-h`, …) stay the
+stylesheet's and your CSS can set them; with it the widget writes them inline.
+The widget draws its faces without OpenType features; to turn on your face's
+own, set `--1p-font-features` on `.pcw-root` from your CSS:
+`.pcw-root { --1p-font-features: 'cv11', 'ss01' }` for Inter. `ui` never
+sets it, and it reaches the widget's text, buttons and fields, not the chart's.
+
+## The chart's look by key
+
+```ts
+import { Chart, CHART_STYLE_KEYS, type ChartStyleKey } from '@1penny/chart';
+
+const chart = new Chart(document.getElementById('chart')!, {
+  theme: 'dark',
+  overrides: { 'grid.vertical.visible': false },   // the host's layer, from the start
+});
+
+// Any key of CHART_STYLE_KEYS; up/down colours fall back to series.candlestick.*
+chart.applyOverrides({
+  'series.candlestick.upColor': '#26a69a',
+  'series.candlestick.downColor': '#ef5350',
+  'grid.horizontal.style': 'dotted',
+  'crosshair.vertical.style': 'solid',
+  'lastPrice.style': 'solid',
+});
+chart.applyOverrides({ 'lastPrice.style': null });          // null takes a key away
+
+// What the user picks: kept with the theme it was picked on, saved with saveState()
+chart.applyOverrides({ 'background.color': '#0b0b0f' }, { layer: 'user' });
+
+const macd = chart.addIndicator('macd', {});
+if (macd) {
+  chart.updateIndicatorStyle(macd, { plots: { signal: { lineStyle: 'dashed' }, histogram: { visible: false } } });
+  chart.setPaneStyle(macd, { separator: '#f2a93b' });
+}
+chart.setIndicatorDefaults('ema', { colors: ['#f5a623'], lineWidths: [2] });
+
+const keys = Object.keys(CHART_STYLE_KEYS) as ChartStyleKey[];
+console.log(keys.length, chart.getStyleValue('series.bar.upColor'), chart.getStyle().grid.vertical.visible);
+chart.on('styleChange', (e) => console.log(e.payload.layer));
+```
+
+`getTheme()` is the theme as set; the overrides go on it apart, so
+`setTheme(getTheme())` never bakes them in. The host's layer stays through
+theme switches and is never saved. A grid of charts takes them for every
+chart with `grid.applyOverrides(patch)`. Orders and positions (`trading.*`),
+signal markers (`markers.*`), trade zones (`tradeZones.*`) and a selected
+drawing's handles (`drawings.handleColor`) read back `null` until set: they
+keep their own colours (a handle is filled with the chart's background). In the widget, Settings → Style and Settings →
+Trading edit every key on the user's layer, with Auto for those.
+
+## The widget with only the parts you want, and parts of your own
+
+```ts
+import { ChartWidget, WIDGET_FEATURES, type WidgetFeature } from '@1penny/chart/widget';
+
+const widget = new ChartWidget(document.getElementById('chart')!, {
+  symbol: 'BTCUSDT',
+  features: {
+    'toolbar.replay': false,          // one button
+    'sidebar.patterns': false,        // a section of drawing tools
+    'menu.chart.exportData': false,   // one menu entry
+    hotkeys: false,                   // every key of the widget's
+  },
+  drawingMenuItems: ({ id, type }) => [{ label: `Copy ${type}`, icon: 'link', onSelect: () => void navigator.clipboard.writeText(id) }],
+  indicatorMenuItems: ({ indicatorId }) => [{ label: 'About', icon: 'info', onSelect: () => console.log(indicatorId) }],
+});
+
+// While it runs: a clean chart, and back
+widget.setFeatures({ sidebar: false, statusBar: false });
+widget.setFeatures({ sidebar: true, statusBar: true });
+
+// A menu of switches of your own on the toolbar
+const parts: WidgetFeature[] = ['sidebar', 'statusBar', 'navigation', 'indicatorLegend'];
+widget.addToolbarDropdown({
+  id: 'parts',
+  label: 'Parts',
+  icon: 'layers',
+  items: () => parts.map((name) => ({
+    label: name,
+    checked: widget.isFeatureOn(name),
+    onSelect: () => widget.setFeatures({ [name]: !widget.isFeatureOn(name) }),
+  })),
+});
+
+const latency = widget.addStatusBarItem({ id: 'latency', text: '— ms', label: 'Latency' });
+latency?.setText('12 ms');
+
+// A shortcut of your own, listed in the shortcut sheet (?). It replaces a widget shortcut on the
+// same keys; the chart's own keys (arrows, Delete, Ctrl+Z) still run, and it warns of those.
+const shortcut = widget.addHotkey({ keys: 'Alt+L', label: 'Show the latency', onPress: () => latency?.setText('12 ms') });
+shortcut?.remove();
+const focus = widget.addSidebarButton({
+  id: 'focus',
+  label: 'Focus',
+  icon: 'eye',
+  toggle: true,
+  onClick: () => {
+    const on = !widget.isFeatureOn('toolbar');
+    widget.setFeatures({ toolbar: on });
+    focus?.setActive(!on);
+  },
+});
+
+const badge = document.createElement('div');
+badge.textContent = 'Paper account';
+badge.style.cssText = 'position:absolute;right:72px;top:8px;pointer-events:auto';
+widget.getSlot('chart')?.append(badge);       // a layer over the chart the pointer passes through
+
+console.log(WIDGET_FEATURES.length, widget.getFeatures().alerts);
+```
+
+A name without a dot (`alerts`, `settings`, `hotkeys`) turns a capability off
+wherever it shows; a dotted one (`toolbar.alerts`) one place. A part shows while
+all of its switches are on, and `isFeatureOn` answers for one switch as set:
+with `alerts: false`, `isFeatureOn('toolbar.alerts')` is still `true`. The older options
+(`toolbar: false`, `drawingTools: false`…) are the same switches. They hide the
+widget's own UI; `chartOptions.features` is what stops drawing, trading or zoom
+on the chart. A `ChartWidgetGrid` takes them for every chart with
+`grid.setFeatures(patch)`.
+
+## Watchlists with live quotes, and a tick chart
+
+```ts
+import { ChartWidget } from '@1penny/chart/widget';
+import { BinanceAdapter, marketStatus } from '@1penny/chart';
+
+const widget = new ChartWidget(document.getElementById('chart')!, {
+  adapter: new BinanceAdapter(),      // its subscribeQuotes fills the rows
+  symbol: 'BTCUSDT',
+  watchlist: {
+    lists: [
+      { id: 'majors', name: 'Majors', symbols: ['BTCUSDT', 'ETHUSDT'] },
+      { id: 'alts', name: 'Alts', symbols: ['SOLUSDT', 'ADAUSDT'] },
+    ],
+    persist: true,
+  },
+});
+widget.addToWatchlist('BNBUSDT', 'alts');
+widget.openPanel('symbolInfo');        // price, market status, the day, hours, news
+widget.openPanel('watchlist');         // the panels share the dock beside the chart, all shut to start with
+
+// A page of your own in the dock: its button after the built-in ones, your element under the dock's header
+const figures = document.createElement('div');
+const figuresPage = widget.addDockPage({ id: 'figures', label: 'Key figures', icon: 'info', element: figures });
+widget.openPanel('figures');
+figuresPage?.remove();
+await widget.setTimeframe('100T');     // a bar per 100 trades, from Binance's trades
+
+// Your own feed's quotes instead
+widget.setQuotes([{ symbol: 'AAPL', last: 190.2, prevClose: 188.1 }]);
+console.log(marketStatus({ symbol: 'AAPL', timeZone: 'America/New_York', sessions: [{ start: '09:30', end: '16:00', days: [1, 2, 3, 4, 5] }] }, Date.now()).state);
+```
+
+A watchlist row is one line: the ticker (a venue before it, `HYPERLIQUID:xyz:NVDA`,
+shows on hover), last price, move and % change; `watchlist: { sparkline: true }`
+puts a small chart of recent prices in place of the move.
+Quotes come from a feed's `subscribeQuotes` (or `watchlist.quotes`, or
+`setQuotes`); tick timeframes need a feed with `fetchTrades` and
+`subscribeTrades`. The watchlist, alerts, object tree, data window, symbol
+info and (with `depthLadder: true`) the depth ladder are panels of one dock
+beside the chart, all shut to start with, opened from a rail at its edge or
+with `widget.openPanel(...)`; `features: { dock: false }` drops the rail.
+`addDockPage` puts a page of yours there too, and the `onPanelChange` option is
+told which panel is open (or `null`) whenever that changes.

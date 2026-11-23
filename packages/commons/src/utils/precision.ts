@@ -1,0 +1,178 @@
+const NUMBER_FORMAT_CACHE_LIMIT = 64;
+const numberFormatCache = new Map<string, Intl.NumberFormat>();
+
+/**
+ * `Number#toLocaleString(locale, options)` constructs a fresh
+ * `Intl.NumberFormat` on every call — ~20µs in V8 versus ~0.4µs to reuse one.
+ * Axis labels, the legend, crosshair pills and panel axes format dozens of
+ * numbers per frame, so formatters are cached per (locale, precision). The
+ * output is identical: per spec, `toLocaleString` is defined as exactly this.
+ */
+function numberFormat(locale: string, precision: number): Intl.NumberFormat {
+  const key = `${locale}|${precision}`;
+  let nf = numberFormatCache.get(key);
+  if (!nf) {
+    if (numberFormatCache.size >= NUMBER_FORMAT_CACHE_LIMIT) numberFormatCache.clear();
+    nf = new Intl.NumberFormat(locale, {
+      minimumFractionDigits: precision,
+      maximumFractionDigits: precision,
+    });
+    numberFormatCache.set(key, nf);
+  }
+  return nf;
+}
+
+/**
+ * A price on a tag beside the axis (an order, a position, an alert) as the
+ * axis writes one: the chart's price format when it has one, else grouped in
+ * its number locale at `precision` decimals, or the market's or the symbol's
+ * (`viewport.pricePrecision`), or the axis's own for the range on view when
+ * neither is given.
+ */
+export function priceTagText(
+  price: number,
+  viewport: Pick<ViewportState, 'formatPrice' | 'numberLocale' | 'priceRange' | 'pricePrecision'>,
+  precision?: number,
+): string {
+  if (viewport.formatPrice) return viewport.formatPrice(price);
+  const decimals = precision ?? viewport.pricePrecision ?? autoPricePrecision(viewport.priceRange.min, viewport.priceRange.max);
+  return formatPrice(price, decimals, viewport.numberLocale ?? 'en-US');
+}
+
+/** Most decimals a price is written with: within what every `Intl.NumberFormat` takes (20). */
+export const MAX_PRICE_DECIMALS = 16;
+
+/**
+ * Decimals that show `figures` significant figures of a value under 1: 5 for
+ * 0.01234, 11 for 0.0000000712 (a coin priced in billionths), up to
+ * `MAX_PRICE_DECIMALS`. What writes a small price away from the axis reads
+ * it, so none stops at a fixed count of decimals and cuts the figures short.
+ * A value of nothing gives `figures - 1`.
+ */
+export function smallValueDecimals(value: number, figures = 4): number {
+  const abs = Math.abs(value);
+  if (!(abs > 0) || !Number.isFinite(abs)) return figures - 1;
+  return Math.min(MAX_PRICE_DECIMALS, Math.max(0, figures - 1 - Math.floor(Math.log10(abs))));
+}
+
+export function formatPrice(value: number, precision = 2, locale = 'en-US'): string {
+  return numberFormat(locale, precision).format(value);
+}
+
+/**
+ * Decimals the price axis uses for a visible price range: one more than its
+ * tick step needs, 2 at minimum, and under 1 as many as show four figures of
+ * the largest price on view. Everything that prints a price next to the
+ * axis (legend, crosshair pill, last-price tag) shares it, so a sub-cent
+ * asset reads "0.000004349" everywhere instead of "0.00" off the axis.
+ */
+export function autoPricePrecision(min: number, max: number): number {
+  if (!(max > min) || !Number.isFinite(min) || !Number.isFinite(max)) return 2;
+  const step = computeTickStep(min, max, 8);
+  const forStep = step > 0 && step < 1 ? Math.ceil(-Math.log10(step)) + 1 : 2;
+  // Under 1, at least four figures of the price itself: a wide range on a sub-cent coin steps
+  // coarsely, and the step's decimals alone left the legend two or three figures of its price.
+  const largest = Math.max(Math.abs(min), Math.abs(max));
+  return largest < 1 ? Math.max(forStep, smallValueDecimals(largest, SMALL_PRICE_FIGURES)) : forStep;
+}
+
+/** Significant figures a price under 1 shows at least, next to the axis. */
+const SMALL_PRICE_FIGURES = 4;
+
+import type { PriceScaleMode, ViewportState } from '../types/rendering.js';
+import type { PriceFormatter, PriceFraction } from '../types/chart.js';
+import { computeTickStep } from './math.js';
+
+/** Decimals a percentage on the price scale shows. */
+const PERCENT_DECIMALS = 2;
+
+/**
+ * Format a price-axis label for a given scale mode, in the number locale.
+ *
+ * - `regular` / `logarithmic`: the raw price.
+ * - `percentage`: change from `baseline`, e.g. `+12.34%` (`+12,34%` in
+ *   `de-DE`); one that reads as nothing has no sign.
+ * - `indexedTo100`: the price rebased so `baseline` reads as 100.
+ *
+ * Falls back to a plain price when a baseline is required but missing/zero.
+ */
+export function formatPriceScaleLabel(
+  price: number,
+  mode: PriceScaleMode,
+  baseline: number | undefined,
+  precision = 2,
+  locale = 'en-US',
+): string {
+  if ((mode === 'percentage' || mode === 'indexedTo100') && baseline && baseline !== 0) {
+    if (mode === 'percentage') {
+      const pct = (price / baseline - 1) * 100;
+      const text = formatPrice(Math.abs(pct), PERCENT_DECIMALS, locale);
+      const sign = text === formatPrice(0, PERCENT_DECIMALS, locale) ? '' : pct > 0 ? '+' : '-';
+      return `${sign}${text}%`;
+    }
+    const indexed = (price / baseline) * 100;
+    return formatPrice(indexed, 2, locale);
+  }
+  return formatPrice(price, precision, locale);
+}
+
+/**
+ * `value` in fractions of a point: whole points, an apostrophe, then the
+ * fraction's numerator padded to the denominator's digits (`101'16` for
+ * 101.5 in 32nds). A `subDenominator` of 2 or 4 adds the half or quarter of
+ * that fraction as one more digit, as futures quote it (`101'165`, `110'162`,
+ * `110'167`). Rounds to the nearest step. A denominator that isn't a whole
+ * number above 1 gives plain digits.
+ */
+export function formatFraction(value: number, denominator: number, subDenominator = 1): string {
+  const sub = Number.isInteger(subDenominator) && subDenominator > 1 ? subDenominator : 1;
+  if (!Number.isFinite(value) || !Number.isInteger(denominator) || denominator < 2) return String(value);
+  const steps = denominator * sub;
+  const total = Math.round(Math.abs(value) * steps);
+  const whole = Math.floor(total / steps);
+  const rest = total - whole * steps;
+  const numerator = Math.floor(rest / sub);
+  const width = String(denominator - 1).length;
+  const tail = sub > 1 ? String(Math.floor(((rest - numerator * sub) / sub) * 10)) : '';
+  const sign = value < 0 && total > 0 ? '-' : '';
+  return `${sign}${whole}'${String(numerator).padStart(width, '0')}${tail}`;
+}
+
+/**
+ * The smallest step a fraction format prints (a 32nd; a quarter of one with
+ * `subDenominator` 4), or null for a denominator it can't print (it falls
+ * back to plain digits then).
+ */
+export function fractionTick(fraction: PriceFraction): number | null {
+  if (!Number.isInteger(fraction.denominator) || fraction.denominator < 2) return null;
+  const sub = Number.isInteger(fraction.subDenominator) && (fraction.subDenominator ?? 0) > 1 ? fraction.subDenominator as number : 1;
+  return 1 / (fraction.denominator * sub);
+}
+
+/** The formatter a `priceFormat` option stands for: its function, its fraction's, or null for decimals. */
+export function priceFormatterFor(format: PriceFormatter | PriceFraction | null | undefined): PriceFormatter | null {
+  if (!format) return null;
+  if (typeof format === 'function') return format;
+  // A denominator it can't print leaves the chart's decimals.
+  if (fractionTick(format) === null) return null;
+  return (price) => formatFraction(price, format.denominator, format.subDenominator);
+}
+
+export function formatVolume(value: number): string {
+  if (value >= 1_000_000_000) return (value / 1_000_000_000).toFixed(2) + 'B';
+  if (value >= 1_000_000) return (value / 1_000_000).toFixed(2) + 'M';
+  if (value >= 1_000) return (value / 1_000).toFixed(2) + 'K';
+  return value.toFixed(0);
+}
+
+export function detectPrecision(values: number[]): number {
+  let maxDecimals = 0;
+  for (const v of values) {
+    const str = v.toString();
+    const dot = str.indexOf('.');
+    if (dot >= 0) {
+      maxDecimals = Math.max(maxDecimals, str.length - dot - 1);
+    }
+  }
+  return Math.min(maxDecimals, 8);
+}

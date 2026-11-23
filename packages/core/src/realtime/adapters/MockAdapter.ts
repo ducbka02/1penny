@@ -1,0 +1,289 @@
+import type {
+  DataAdapter,
+  DataAdapterConfig,
+  DataAdapterEventType,
+  DataAdapterListener,
+  ConnectionState,
+  OHLCBar,
+  Quote,
+  Trade,
+  SymbolInfo,
+  SymbolSearchOptions,
+  TimeFrame,
+} from '@1penny/commons';
+import { rankSymbols, timeframeToMs } from '@1penny/commons';
+
+export interface MockAdapterOptions {
+  /** Base price to generate data around */
+  basePrice?: number;
+  /** Volatility as percentage (default: 1.5) */
+  volatility?: number;
+  /** Tick interval in ms (default: 2000) */
+  tickInterval?: number;
+  /** Number of historical bars to generate */
+  historySize?: number;
+  /** Custom history generator */
+  historyGenerator?: (symbol: string, timeframe: TimeFrame, limit: number) => OHLCBar[];
+  /** Symbols `searchSymbols` and `resolveSymbol` know. */
+  symbols?: SymbolInfo[];
+}
+
+/**
+ * Mock data adapter for testing, demos, and markets without free APIs.
+ *
+ * Generates realistic OHLCV data with configurable volatility.
+ * Useful for:
+ * - Unit/integration testing
+ * - VN stock market simulation
+ * - Offline development
+ */
+export class MockAdapter implements DataAdapter {
+  readonly name = 'mock';
+
+  private state: ConnectionState = 'disconnected';
+  private listeners = new Map<DataAdapterEventType, Set<DataAdapterListener>>();
+  private config: DataAdapterConfig | null = null;
+  private options: MockAdapterOptions;
+  private tickTimer: ReturnType<typeof setInterval> | null = null;
+  private currentPrice: number;
+  /** Open of the oldest bar handed out per symbol, where its next older page ends. */
+  private oldestOpen = new Map<string, number>();
+  /** The bar the ticks build on, and its timeframe: the history's newest, then each new one. */
+  private forming: OHLCBar | null = null;
+  private formingTimeframe: TimeFrame | null = null;
+
+  constructor(options?: MockAdapterOptions) {
+    this.options = {
+      basePrice: 100,
+      volatility: 1.5,
+      tickInterval: 2000,
+      historySize: 500,
+      ...options,
+    };
+    this.currentPrice = this.options.basePrice!;
+  }
+
+  connect(config: DataAdapterConfig): void {
+    this.config = config;
+    this.state = 'connected';
+    this.emitEvent('connectionChange', 'connected');
+    this.startTicking();
+  }
+
+  disconnect(): void {
+    this.stopTicking();
+    this.state = 'disconnected';
+    this.emitEvent('connectionChange', 'disconnected');
+  }
+
+  getConnectionState(): ConnectionState {
+    return this.state;
+  }
+
+  /**
+   * Made-up quotes: a random walk per symbol around `basePrice` (each symbol
+   * starting at a price of its own), every symbol quoted at once and then each
+   * `tickInterval`.
+   */
+  subscribeQuotes(symbols: readonly string[], onQuotes: (quotes: Quote[]) => void): () => void {
+    const walks = [...new Set(symbols)].map((symbol) => {
+      const open = this.options.basePrice! * (0.5 + (symbolHash(symbol) % 1000) / 1000);
+      return { symbol, open, last: open, high: open, low: open, volume: 0 };
+    });
+    if (walks.length === 0) return () => {};
+    const step = this.options.volatility! / 100;
+    const emit = (): void => onQuotes(walks.map((w) => ({
+      symbol: w.symbol,
+      last: w.last,
+      open: w.open,
+      high: w.high,
+      low: w.low,
+      volume: w.volume,
+      change: w.last - w.open,
+      changePercent: ((w.last - w.open) / w.open) * 100,
+      time: Date.now(),
+    })));
+    emit();
+    const timer = setInterval(() => {
+      for (const w of walks) {
+        w.last = Math.max(w.open * 0.01, w.last * (1 + (Math.random() - 0.5) * step));
+        w.high = Math.max(w.high, w.last);
+        w.low = Math.min(w.low, w.last);
+        w.volume += Math.random() * 100;
+      }
+      emit();
+    }, this.options.tickInterval);
+    return () => clearInterval(timer);
+  }
+
+  /** Made-up recent trades: a walk around `basePrice`, a second apart, oldest first. */
+  async fetchTrades(symbol: string, limit = 1000): Promise<Trade[]> {
+    const count = Math.max(1, Math.min(1000, Math.floor(limit)));
+    const now = Date.now();
+    const step = this.options.volatility! / 1000;
+    let price = this.options.basePrice! * (0.5 + (symbolHash(symbol) % 1000) / 1000);
+    const trades: Trade[] = [];
+    for (let i = count - 1; i >= 0; i--) {
+      price = Math.max(price * 0.5, price * (1 + (Math.random() - 0.5) * step));
+      trades.push({ time: now - i * 1000, price, volume: Math.random() * 5 });
+    }
+    return trades;
+  }
+
+  /** Made-up live trades, a few each `tickInterval`. */
+  subscribeTrades(symbol: string, onTrades: (trades: Trade[]) => void): () => void {
+    const step = this.options.volatility! / 1000;
+    let price = this.options.basePrice! * (0.5 + (symbolHash(symbol) % 1000) / 1000);
+    const timer = setInterval(() => {
+      const trades: Trade[] = [];
+      for (let i = 0; i < 3; i++) {
+        price = Math.max(price * 0.5, price * (1 + (Math.random() - 0.5) * step));
+        trades.push({ time: Date.now(), price, volume: Math.random() * 5 });
+      }
+      onTrades(trades);
+    }, this.options.tickInterval);
+    return () => clearInterval(timer);
+  }
+
+  async fetchHistory(symbol: string, timeframe: TimeFrame, limit?: number): Promise<OHLCBar[]> {
+    const bars = this.options.historyGenerator
+      ? this.options.historyGenerator(symbol, timeframe, limit ?? this.options.historySize!)
+      : this.generateHistory(timeframe, limit ?? this.options.historySize!);
+    if (bars.length > 0) this.oldestOpen.set(symbol, bars[0].open);
+    this.forming = bars.length > 0 ? { ...bars[bars.length - 1] } : null;
+    this.formingTimeframe = timeframe;
+    return bars;
+  }
+
+  /** Make up `limit` bars before `before` (ms) that lead into the oldest bar handed out. */
+  async fetchHistoryBefore(symbol: string, timeframe: TimeFrame, before: number, limit: number): Promise<OHLCBar[]> {
+    const intervalMs = timeframeToMs(timeframe);
+    const vol = this.options.volatility! / 100;
+    const bars: OHLCBar[] = new Array(Math.max(0, limit));
+    let close = this.oldestOpen.get(symbol) ?? this.options.basePrice!;
+    // Walk back in time: each bar's close is the next one's open.
+    for (let k = 0; k < limit; k++) {
+      const open = close / (1 + (Math.random() - 0.52) * vol);
+      const high = Math.max(open, close) + Math.random() * close * vol * 0.3;
+      const low = Math.max(0, Math.min(open, close) - Math.random() * close * vol * 0.3);
+      const volume = Math.floor(10000 + Math.random() * 100000);
+      bars[limit - 1 - k] = { time: before - (k + 1) * intervalMs, open, high, low, close, volume };
+      close = open;
+    }
+    this.oldestOpen.set(symbol, close);
+    return bars;
+  }
+
+  async searchSymbols(query: string, options?: SymbolSearchOptions): Promise<SymbolInfo[]> {
+    return rankSymbols(this.options.symbols ?? [], query, options?.limit ?? 50);
+  }
+
+  async resolveSymbol(symbol: string): Promise<SymbolInfo | null> {
+    return this.options.symbols?.find((s) => s.symbol === symbol) ?? null;
+  }
+
+  on<T = unknown>(event: DataAdapterEventType, listener: DataAdapterListener<T>): void {
+    let set = this.listeners.get(event);
+    if (!set) { set = new Set(); this.listeners.set(event, set); }
+    set.add(listener as DataAdapterListener);
+  }
+
+  off<T = unknown>(event: DataAdapterEventType, listener: DataAdapterListener<T>): void {
+    this.listeners.get(event)?.delete(listener as DataAdapterListener);
+  }
+
+  dispose(): void {
+    this.disconnect();
+    this.listeners.clear();
+  }
+
+  // --- Internal ---
+
+  private generateHistory(timeframe: TimeFrame, count: number): OHLCBar[] {
+    const bars: OHLCBar[] = [];
+    const intervalMs = timeframeToMs(timeframe);
+    // On the timeframe's grid, as a feed's bars are: the newest is the one now forming.
+    const newest = Math.floor(Date.now() / intervalMs) * intervalMs;
+    let price = this.options.basePrice!;
+    const vol = this.options.volatility! / 100;
+
+    for (let i = count - 1; i >= 0; i--) {
+      const time = newest - i * intervalMs;
+      const change = (Math.random() - 0.48) * price * vol;
+      const open = price;
+      price += change;
+      const high = Math.max(open, price) + Math.random() * price * vol * 0.3;
+      const low = Math.min(open, price) - Math.random() * price * vol * 0.3;
+      const volume = Math.floor(10000 + Math.random() * 100000);
+      bars.push({ time, open, high, low, close: price, volume });
+    }
+
+    this.currentPrice = price;
+    return bars;
+  }
+
+  private startTicking(): void {
+    this.stopTicking();
+    const interval = this.options.tickInterval ?? 2000;
+
+    this.tickTimer = setInterval(() => {
+      if (this.state !== 'connected' || !this.config) return;
+
+      const vol = this.options.volatility! / 100;
+      const change = (Math.random() - 0.48) * this.currentPrice * vol * 0.3;
+      this.currentPrice += change;
+
+      const now = Date.now();
+      const bar = this.tickBar(now, change, Math.floor(100 + Math.random() * 5000));
+      // A forming bar each tick; the next bar's time starts the next one.
+      this.emitEvent('bar', { bar, closed: false });
+      this.emitEvent('tick', { time: now, price: this.currentPrice, volume: bar.volume });
+    }, interval);
+  }
+
+  /**
+   * The forming bar after a tick moved the price by `change`: the bar of this
+   * moment carried on (its open kept, its range widened, its volume added),
+   * or a new one opening at the last close once its time has come.
+   */
+  private tickBar(now: number, change: number, volume: number): OHLCBar {
+    const timeframe = this.config!.timeframe;
+    const intervalMs = timeframeToMs(timeframe);
+    const time = Math.floor(now / intervalMs) * intervalMs;
+    const price = this.currentPrice;
+    const last = this.formingTimeframe === timeframe ? this.forming : null;
+    const wick = Math.abs(change) * 0.2;
+    let bar: OHLCBar;
+    if (last && last.time === time) {
+      bar = { time, open: last.open, high: Math.max(last.high, price + wick), low: Math.min(last.low, price - wick), close: price, volume: last.volume + volume };
+    } else {
+      const open = last?.close ?? price - change;
+      bar = { time, open, high: Math.max(open, price) + wick, low: Math.min(open, price) - wick, close: price, volume };
+    }
+    this.forming = bar;
+    this.formingTimeframe = timeframe;
+    return { ...bar };
+  }
+
+  private stopTicking(): void {
+    if (this.tickTimer) {
+      clearInterval(this.tickTimer);
+      this.tickTimer = null;
+    }
+  }
+
+  private emitEvent(type: DataAdapterEventType, data: unknown): void {
+    const set = this.listeners.get(type);
+    if (set) {
+      const event = { type, data, timestamp: Date.now() };
+      for (const listener of set) listener(event);
+    }
+  }
+}
+
+/** A steady number for a symbol, so each one's made-up price is its own. */
+function symbolHash(symbol: string): number {
+  let h = 0;
+  for (let i = 0; i < symbol.length; i++) h = (h * 31 + symbol.charCodeAt(i)) >>> 0;
+  return h;
+}

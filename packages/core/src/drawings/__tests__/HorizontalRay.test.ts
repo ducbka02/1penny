@@ -1,0 +1,40 @@
+import { describe, it, expect } from 'vitest';
+import { HorizontalRayTool } from '../tools/HorizontalRay.js';
+import { drawing, textCtx, unitViewport } from './fixtures.js';
+
+describe('HorizontalRayTool.hitTest', () => {
+  const tool = new HorizontalRayTool();
+
+  it('hits points at the configured price, forward of the anchor in time', () => {
+    // anchor (time 5, price 30) -> pixel (55, 70).
+    const state = drawing('horizontalRay', [{ time: 5, price: 30 }]);
+    expect(tool.hitTest({ x: 55, y: 70 }, state, unitViewport, 2)).toBe(true);
+    expect(tool.hitTest({ x: 800, y: 70 }, state, unitViewport, 2)).toBe(true);
+  });
+
+  it('does not extend backward past the anchor, unlike horizontalLine', () => {
+    const state = drawing('horizontalRay', [{ time: 5, price: 30 }]);
+    expect(tool.hitTest({ x: 5, y: 70 }, state, unitViewport, 2)).toBe(false);
+  });
+
+  it('misses when the y is outside tolerance', () => {
+    const state = drawing('horizontalRay', [{ time: 5, price: 30 }]);
+    expect(tool.hitTest({ x: 100, y: 50 }, state, unitViewport, 2)).toBe(false);
+  });
+
+  it('returns false with no anchors', () => {
+    const state = drawing('horizontalRay', []);
+    expect(tool.hitTest({ x: 5, y: 70 }, state, unitViewport, 2)).toBe(false);
+  });
+});
+
+describe('HorizontalRayTool price label', () => {
+  it('is left-aligned by its anchor whatever alignment the context was left with', () => {
+    // anchor (time 5, price 30) -> pixel (55, 70); the label starts 4px past its handle (a 4.5 px radius at width 1).
+    const { ctx, drawn } = textCtx();
+    ctx.textAlign = 'right';
+    new HorizontalRayTool().render(ctx, drawing('horizontalRay', [{ time: 5, price: 30 }]), unitViewport, false);
+    const label = drawn.find((d) => d.text === '30.00');
+    expect(label).toMatchObject({ align: 'left', baseline: 'bottom', left: 63.5, y: 67 });
+  });
+});

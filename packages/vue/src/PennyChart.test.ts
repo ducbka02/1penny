@@ -1,0 +1,247 @@
+import { mount } from '@vue/test-utils';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+const { chart, ChartCtor } = vi.hoisted(() => {
+  // The bars it holds, as a chart keeps them: the component reads them back.
+  const held: unknown[] = [];
+  const chart = {
+    connect: vi.fn(),
+    setData: vi.fn((bars: unknown[]) => { held.splice(0, held.length, ...bars); }),
+    updateLastBar: vi.fn((bar: unknown) => { held[held.length - 1] = bar; }),
+    appendBar: vi.fn((bar: unknown) => { held.push(bar); }),
+    appendBars: vi.fn((bars: unknown[]) => { held.push(...bars); }),
+    // As the chart's: the loaded bar with that time, or false.
+    updateBar: vi.fn((bar: { time: number }) => {
+      const i = held.findIndex((h) => (h as { time: number }).time === bar.time);
+      if (i < 0) return false;
+      held[i] = bar;
+      return true;
+    }),
+    getData: () => held,
+    isExtendedHoursVisible: () => true,
+    isReplayActive: () => false,
+    setChartType: vi.fn(),
+    setTheme: vi.fn(),
+    addIndicator: vi.fn((id: string) => `iid-${id}`),
+    removeIndicator: vi.fn(),
+    setSignalMarkers: vi.fn(),
+    setSignalMarkerStyle: vi.fn(),
+    setTradeZones: vi.fn(),
+    setTradeZoneStyle: vi.fn(),
+    setOverrides: vi.fn(),
+    setFeatures: vi.fn(),
+    setWatermark: vi.fn(),
+    on: vi.fn(),
+    disconnectStream: vi.fn(),
+    destroy: vi.fn(),
+    screenshot: vi.fn(),
+    screenshotDataURL: vi.fn(() => 'data:'),
+  };
+  return { chart, ChartCtor: vi.fn(() => chart) };
+});
+
+vi.mock('@1penny/chart', async (importOriginal) => ({
+  syncIndicators: (await importOriginal<typeof import('@1penny/chart')>()).syncIndicators,
+  feedBars: (await importOriginal<typeof import('@1penny/chart')>()).feedBars,
+  CORRECTABLE_BARS: (await importOriginal<typeof import('@1penny/chart')>()).CORRECTABLE_BARS,
+  Chart: ChartCtor,
+  BinanceAdapter: vi.fn(),
+  DARK_THEME: { name: 'dark' },
+  LIGHT_THEME: { name: 'light' },
+}));
+
+import PennyChart from './PennyChart.vue';
+
+beforeEach(() => vi.clearAllMocks());
+
+const BAR = { time: 1, open: 1, high: 1, low: 1, close: 1, volume: 1 };
+const FEED = { name: 'pulled', getBars: async () => [], subscribeBars: () => () => {} };
+
+describe('<PennyChart> (vue)', () => {
+  it('passes options through to the Chart, under its own props', () => {
+    mount(PennyChart, {
+      props: {
+        chartType: 'line',
+        features: { trading: false },
+        options: { maxBarSpacing: 160, rightMargin: 1, chartType: 'bar', features: { alerts: false, trading: true } },
+      },
+    });
+    const opts = (ChartCtor.mock.calls[0] as unknown[])[1] as Record<string, unknown>;
+    expect(opts).toMatchObject({ maxBarSpacing: 160, rightMargin: 1, chartType: 'line' });
+    expect(opts.features).toMatchObject({ alerts: false, trading: false, drawings: true });
+  });
+
+  it('keeps a watermark from options when there is no watermarkText', () => {
+    mount(PennyChart, { props: { options: { watermark: { text: 'VN30F1M' } } } });
+    const opts = (ChartCtor.mock.calls[0] as unknown[])[1] as Record<string, unknown>;
+    expect(opts.watermark).toEqual({ text: 'VN30F1M' });
+  });
+
+  it('keeps its own defaults without options', () => {
+    mount(PennyChart);
+    const opts = (ChartCtor.mock.calls[0] as unknown[])[1] as Record<string, unknown>;
+    expect(opts).toMatchObject({ crosshair: { mode: 'magnet' } });
+    // The room past the newest bar is the chart's own, by its density.
+    expect(opts.rightMargin).toBeUndefined();
+  });
+
+  it('constructs a Chart and connects with the symbol/timeframe', () => {
+    mount(PennyChart, { props: { symbol: 'ETHUSDT', timeframe: '1m' } });
+    expect(ChartCtor).toHaveBeenCalledTimes(1);
+    expect(chart.connect).toHaveBeenCalledWith(
+      expect.objectContaining({ symbol: 'ETHUSDT', timeframe: '1m' }),
+    );
+  });
+
+  it('connects to a feed instead of an adapter when given one', () => {
+    mount(PennyChart, { props: { feed: FEED, symbol: 'AAA', timeframe: '1h' } });
+    expect(chart.connect).toHaveBeenCalledWith(expect.objectContaining({ feed: FEED, symbol: 'AAA', timeframe: '1h' }));
+    expect((chart.connect.mock.calls[0] as unknown[])[0]).not.toHaveProperty('adapter');
+  });
+
+  it('uses setData for static data and does not connect', () => {
+    mount(PennyChart, { props: { data: [BAR] } });
+    expect(chart.setData).toHaveBeenCalled();
+    expect(chart.connect).not.toHaveBeenCalled();
+  });
+
+  it('adds the requested indicators on mount', () => {
+    mount(PennyChart, { props: { indicators: ['rsi', 'macd'] } });
+    expect(chart.addIndicator).toHaveBeenCalledWith('rsi');
+    expect(chart.addIndicator).toHaveBeenCalledWith('macd');
+  });
+
+  it('puts the overrides prop on the chart, and changes them with it', async () => {
+    const wrapper = mount(PennyChart, { props: { overrides: { 'grid.vertical.visible': false } } });
+    expect(chart.setOverrides).toHaveBeenLastCalledWith({ 'grid.vertical.visible': false });
+    await wrapper.setProps({ overrides: { 'legend.textColor': '#fff' } });
+    expect(chart.setOverrides).toHaveBeenLastCalledWith({ 'legend.textColor': '#fff' });
+  });
+
+  it('reacts to a chartType prop change', async () => {
+    const wrapper = mount(PennyChart, { props: { chartType: 'candlestick' } });
+    await wrapper.setProps({ chartType: 'line' });
+    expect(chart.setChartType).toHaveBeenCalledWith('line');
+  });
+
+  it('adds indicators with their inputs, and puts one back when its inputs change', async () => {
+    const wrapper = mount(PennyChart, { props: { indicators: [{ id: 'ema', params: { period: 50 } }] } });
+    expect(chart.addIndicator).toHaveBeenCalledWith('ema', { period: 50 });
+    await wrapper.setProps({ indicators: [{ id: 'ema', params: { period: 100 } }] });
+    expect(chart.removeIndicator).toHaveBeenCalledWith('iid-ema');
+    expect(chart.addIndicator).toHaveBeenLastCalledWith('ema', { period: 100 });
+  });
+
+  it('opens no stream of its own with stream: false', () => {
+    mount(PennyChart, { props: { stream: false } });
+    expect(chart.connect).not.toHaveBeenCalled();
+  });
+
+  it('keeps its stream when data comes later, and closes it when switched off', async () => {
+    const wrapper = mount(PennyChart);
+    expect(chart.connect).toHaveBeenCalledTimes(1);
+    await wrapper.setProps({ data: [BAR] });
+    expect(chart.setData).toHaveBeenCalledWith([BAR]);
+    expect(chart.disconnectStream).not.toHaveBeenCalled();
+    await wrapper.setProps({ stream: false });
+    expect(chart.disconnectStream).toHaveBeenCalledTimes(1);
+  });
+
+  it('applies features only when they change', async () => {
+    const wrapper = mount(PennyChart, { props: { features: { replay: true } } });
+    await wrapper.setProps({ features: { replay: true } });
+    expect(chart.setFeatures).not.toHaveBeenCalled();
+  });
+
+  it('applies features changed after mount', async () => {
+    const wrapper = mount(PennyChart, { props: { features: { replay: true } } });
+    expect(chart.setFeatures).not.toHaveBeenCalled();
+    await wrapper.setProps({ features: { replay: false } });
+    expect(chart.setFeatures).toHaveBeenCalledWith({ replay: false });
+  });
+
+  it('destroys the chart on unmount', () => {
+    const wrapper = mount(PennyChart);
+    wrapper.unmount();
+    expect(chart.destroy).toHaveBeenCalled();
+  });
+
+  it('feeds bars pushed onto reactive data as ticks, as plain bars, not proxies', async () => {
+    const { reactive, isProxy, nextTick } = await import('vue');
+    const data = reactive([{ ...BAR }]);
+    mount(PennyChart, { props: { data, stream: false } });
+    expect(chart.setData).toHaveBeenCalledTimes(1);
+    expect(isProxy(chart.setData.mock.calls[0][0])).toBe(false);
+    // A bar pushed goes on the end; the one before it is as it was.
+    data.push({ ...BAR, time: 2 });
+    await nextTick();
+    expect(chart.setData).toHaveBeenCalledTimes(1);
+    expect(chart.updateLastBar).not.toHaveBeenCalled();
+    expect(chart.appendBar).toHaveBeenCalledWith({ ...BAR, time: 2 });
+    expect(isProxy(chart.appendBar.mock.calls[0][0])).toBe(false);
+    // The forming bar changed in place, or replaced: an update of the last bar.
+    data[1].close = 3;
+    await nextTick();
+    expect(chart.updateLastBar).toHaveBeenLastCalledWith({ ...BAR, time: 2, close: 3 });
+    data[1] = { ...BAR, time: 2, close: 4 };
+    await nextTick();
+    expect(chart.updateLastBar).toHaveBeenLastCalledWith({ ...BAR, time: 2, close: 4 });
+    expect(chart.setData).toHaveBeenCalledTimes(1);
+  });
+
+  it('feeds several bars pushed between two renders together', async () => {
+    const { reactive, nextTick } = await import('vue');
+    const data = reactive([{ ...BAR }]);
+    mount(PennyChart, { props: { data, stream: false } });
+    data.push({ ...BAR, time: 2 });
+    data.push({ ...BAR, time: 3 });
+    await nextTick();
+    expect(chart.appendBars).toHaveBeenCalledWith([{ ...BAR, time: 2 }, { ...BAR, time: 3 }]);
+    expect(chart.setData).toHaveBeenCalledTimes(1);
+  });
+
+  it('starts a new series after the data was taken away', async () => {
+    const wrapper = mount(PennyChart, { props: { data: [BAR], stream: false } });
+    await wrapper.setProps({ data: undefined });
+    await wrapper.setProps({ data: [BAR, { ...BAR, time: 2 }] });
+    expect(chart.setData).toHaveBeenCalledTimes(2);
+    expect(chart.appendBar).not.toHaveBeenCalled();
+  });
+
+  it('feeds a bar before the forming one changed in place in reactive data as updateBar, without setData', async () => {
+    const { reactive, nextTick } = await import('vue');
+    const data = reactive([1, 2, 3, 4, 5].map((time) => ({ ...BAR, time })));
+    mount(PennyChart, { props: { data, stream: false } });
+    expect(chart.setData).toHaveBeenCalledTimes(1);
+    // The venue's final for bar 4, the one before the forming bar.
+    Object.assign(data[3], { close: 3, high: 3 });
+    await nextTick();
+    expect(chart.updateBar).toHaveBeenCalledWith({ ...BAR, time: 4, close: 3, high: 3 });
+    // Two bars before the forming one, in place too.
+    Object.assign(data[2], { close: 2, high: 2 });
+    await nextTick();
+    expect(chart.updateBar).toHaveBeenLastCalledWith({ ...BAR, time: 3, close: 2, high: 2 });
+    expect(chart.setData).toHaveBeenCalledTimes(1);
+    expect(chart.updateLastBar).not.toHaveBeenCalled();
+  });
+
+  it('feeds a new array with a bar before the forming one changed as updateBar', async () => {
+    const bars = [1, 2, 3, 4, 5].map((time) => ({ ...BAR, time }));
+    const wrapper = mount(PennyChart, { props: { data: bars, stream: false } });
+    await wrapper.setProps({ data: [...bars.slice(0, 3), { ...bars[3], close: 3, high: 3 }, bars[4]] });
+    expect(chart.updateBar).toHaveBeenCalledWith({ ...BAR, time: 4, close: 3, high: 3 });
+    expect(chart.setData).toHaveBeenCalledTimes(1);
+  });
+
+  it('feeds a new array that goes on from the last as ticks, and takes any other as a new series', async () => {
+    const wrapper = mount(PennyChart, { props: { data: [BAR], stream: false } });
+    await wrapper.setProps({ data: [BAR, { ...BAR, time: 2 }] });
+    expect(chart.setData).toHaveBeenCalledTimes(1);
+    expect(chart.appendBar).toHaveBeenCalledWith({ ...BAR, time: 2 });
+    await wrapper.setProps({ data: [BAR, { ...BAR, time: 2, close: 3 }] });
+    expect(chart.updateLastBar).toHaveBeenLastCalledWith({ ...BAR, time: 2, close: 3 });
+    await wrapper.setProps({ data: [{ ...BAR, time: 5 }] });
+    expect(chart.setData).toHaveBeenCalledTimes(2);
+  });
+});
+

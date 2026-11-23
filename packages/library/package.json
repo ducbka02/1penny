@@ -1,0 +1,96 @@
+{
+  "name": "@1penny/chart",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "1Penny trading chart library (@1penny/chart): candlesticks to Renko, 134 indicators, drawing tools, live feeds, orders on chart, bar replay, and full ChartWidget UI.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ducbka02/1penny.git",
+    "directory": "packages/library"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "sideEffects": false,
+  "keywords": [
+    "trading",
+    "chart",
+    "canvas",
+    "candlestick",
+    "ohlc",
+    "indicators",
+    "drawing-tools",
+    "technical-analysis",
+    "financial-chart",
+    "real-time",
+    "realtime",
+    "fintech",
+    "upbit",
+    "krx",
+    "kospi",
+    "\ucc28\ud2b8",
+    "\uc8fc\uc2dd",
+    "typescript",
+    "charting-library",
+    "trading-chart",
+    "candlestick-chart",
+    "stock-chart",
+    "crypto",
+    "webgl",
+    "javascript",
+    "bar-replay",
+    "paper-trading",
+    "trading-terminal",
+    "crypto-chart",
+    "tradingview-alternative",
+    "lightweight-charts-alternative",
+    "klinecharts-alternative",
+    "react-chart",
+    "vue-chart",
+    "svelte-chart",
+    "mcp",
+    "1penny"
+  ],
+  "homepage": "https://github.com/ducbka02/1penny",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./widget": {
+      "types": "./dist/widget/index.d.ts",
+      "import": "./dist/widget/index.js",
+      "require": "./dist/widget/index.cjs"
+    },
+    "./widget/locales": {
+      "types": "./dist/widget/locales/index.d.ts",
+      "import": "./dist/widget/locales/index.js",
+      "require": "./dist/widget/locales/index.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite build --watch",
+    "clean": "rm -rf dist",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "pnpm build"
+  },
+  "dependencies": {
+    "@1penny/commons": "workspace:*",
+    "@1penny/core": "workspace:*"
+  },
+  "devDependencies": {
+    "jsdom": "^25.0.1",
+    "vitest": "^2.1.8"
+  }
+}

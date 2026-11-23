@@ -1,0 +1,78 @@
+import { describe, it, expect } from 'vitest';
+import {
+  encodeWidgetState,
+  decodeWidgetState,
+  readShareHash,
+  buildShareUrl,
+  type ShareableWidgetState,
+} from '../widgetShareState.js';
+
+const sample: ShareableWidgetState = {
+  v: 1,
+  symbol: 'BTCUSDT',
+  timeframe: '1h',
+  chartType: 'candlestick',
+  scaleMode: 'logarithmic',
+  indicators: [{ id: 'ema', params: { period: 21 } }],
+  drawings: [],
+};
+
+describe('encode/decodeWidgetState', () => {
+  it('round-trips a state through a URL-safe string', () => {
+    const encoded = encodeWidgetState(sample);
+    expect(encoded).not.toMatch(/[+/=]/); // URL-safe, no padding
+    expect(decodeWidgetState(encoded)).toEqual(sample);
+  });
+
+  it('round-trips unicode symbols', () => {
+    const s = { ...sample, symbol: 'BTC€/￥' };
+    expect(decodeWidgetState(encodeWidgetState(s))?.symbol).toBe('BTC€/￥');
+  });
+
+  it('returns null for garbage or wrong version', () => {
+    expect(decodeWidgetState('')).toBeNull();
+    expect(decodeWidgetState('not-base64!!')).toBeNull();
+    const v2 = encodeWidgetState({ ...sample, v: 2 as unknown as 1 });
+    expect(decodeWidgetState(v2)).toBeNull();
+  });
+
+  it('carries the Chart Settings', () => {
+    const shared = { ...sample, settings: { volumeProfileVisible: true, pivotStrength: 7 } };
+    expect(decodeWidgetState(encodeWidgetState(shared))).toEqual(shared);
+  });
+
+  it('reads back only the settings a link may carry, and a scale it knows', () => {
+    const odd = { ...sample, scaleMode: 'sideways' as never, settings: { volumeProfileVisible: 'yes', timezone: 'Asia/Tokyo', pivotStrength: 99, gridVisible: false } as never };
+    const decoded = decodeWidgetState(encodeWidgetState(odd))!;
+    expect(decoded.settings).toEqual({ pivotStrength: 20, gridVisible: false });
+    expect(decoded.scaleMode).toBe('regular');
+  });
+
+  it('defaults scaleMode and arrays when absent', () => {
+    const encoded = encodeWidgetState({ ...sample, scaleMode: undefined as never, indicators: undefined as never, drawings: undefined as never });
+    const decoded = decodeWidgetState(encoded)!;
+    expect(decoded.scaleMode).toBe('regular');
+    expect(decoded.indicators).toEqual([]);
+    expect(decoded.drawings).toEqual([]);
+  });
+});
+
+describe('readShareHash', () => {
+  it('extracts the 1p param from a hash', () => {
+    expect(readShareHash('#1p=abc123')).toBe('abc123');
+    expect(readShareHash('foo=1&1p=xyz')).toBe('xyz');
+    expect(readShareHash('#other=1')).toBeNull();
+    expect(readShareHash('')).toBeNull();
+  });
+
+  it('is null for a fragment that is not a URI component', () => {
+    expect(readShareHash('#1p=%E0%A4%A')).toBeNull();
+  });
+});
+
+describe('buildShareUrl', () => {
+  it('replaces any existing hash with the 1p fragment', () => {
+    expect(buildShareUrl('https://x.io/chart', 'ENC')).toBe('https://x.io/chart#1p=ENC');
+    expect(buildShareUrl('https://x.io/chart#1p=OLD', 'NEW')).toBe('https://x.io/chart#1p=NEW');
+  });
+});

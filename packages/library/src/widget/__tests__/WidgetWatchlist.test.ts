@@ -1,0 +1,311 @@
+// @vitest-environment jsdom
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { WidgetWatchlist, type WatchlistCallbacks } from '../WidgetWatchlist.js';
+import type { WatchlistList } from '../WatchlistStore.js';
+
+const LABELS = {
+  title: 'Watchlist',
+  lists: 'Lists',
+  newList: 'New list…',
+  rename: 'Rename…',
+  deleteList: 'Delete list',
+  confirmDelete: 'Delete {name}? Click again',
+  add: 'Add symbol',
+  remove: 'Remove {symbol}',
+  empty: 'No symbols yet',
+  listName: 'List name',
+};
+
+let host: HTMLDivElement;
+let calls: WatchlistCallbacks;
+let wl: WidgetWatchlist;
+
+const lists: WatchlistList[] = [
+  { id: 'a', name: 'Crypto', symbols: ['BTCUSDT', 'ETHUSDT', 'SOLUSDT'] },
+  { id: 'b', name: '<b>Stocks</b>', symbols: [] },
+];
+
+const rows = () => [...host.querySelectorAll<HTMLElement>('.pcw-watchlist-row')];
+const symbols = () => rows().map((r) => r.dataset.symbol);
+const key = (el: Element, k: string, init: KeyboardEventInit = {}) =>
+  el.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, ...init }));
+
+beforeEach(() => {
+  host = document.createElement('div');
+  document.body.appendChild(host);
+  calls = {
+    onSelect: vi.fn(),
+    onAdd: vi.fn(),
+    onRemove: vi.fn(),
+    onMove: vi.fn(),
+    onPickList: vi.fn(),
+    onCreateList: vi.fn(),
+    onRenameList: vi.fn(),
+    onDeleteList: vi.fn(),
+  };
+  wl = new WidgetWatchlist(host, calls, LABELS);
+  wl.setLists(lists, 'a');
+});
+
+afterEach(() => {
+  wl.destroy();
+  host.remove();
+});
+
+describe('WidgetWatchlist', () => {
+  it('shows the active list’s symbols and name', () => {
+    expect(symbols()).toEqual(['BTCUSDT', 'ETHUSDT', 'SOLUSDT']);
+    expect(host.querySelector('.pcw-watchlist-name')!.textContent).toBe('Crypto');
+    rows()[1].click();
+    expect(calls.onSelect).toHaveBeenCalledWith('ETHUSDT');
+  });
+
+  it('lists the lists in a menu, as text', () => {
+    host.querySelector<HTMLButtonElement>('.pcw-watchlist-name')!.click();
+    const items = [...host.querySelectorAll<HTMLButtonElement>('.pcw-watchlist-menu [data-list]')];
+    expect(items.map((i) => i.textContent)).toEqual(['Crypto3', '<b>Stocks</b>0']);
+    expect(host.querySelector('.pcw-watchlist-menu b')).toBeNull();
+    items[1].click();
+    expect(calls.onPickList).toHaveBeenCalledWith('b');
+  });
+
+  it('shows an empty list as such', () => {
+    wl.setLists(lists, 'b');
+    expect(rows()).toHaveLength(0);
+    expect(host.querySelector('.pcw-watchlist-empty')!.textContent).toBe('No symbols yet');
+  });
+
+  it('names a new list or renames one in place', () => {
+    host.querySelector<HTMLButtonElement>('.pcw-watchlist-name')!.click();
+    host.querySelector<HTMLButtonElement>('[data-action="new"]')!.click();
+    const input = host.querySelector<HTMLInputElement>('.pcw-watchlist-input')!;
+    expect(input.placeholder).toBe('List name');
+    input.value = 'Forex';
+    key(input, 'Enter');
+    expect(calls.onCreateList).toHaveBeenCalledWith('Forex');
+    expect(host.querySelector('.pcw-watchlist-input')).toBeNull();
+
+    host.querySelector<HTMLButtonElement>('.pcw-watchlist-name')!.click();
+    host.querySelector<HTMLButtonElement>('[data-action="rename"]')!.click();
+    const rename = host.querySelector<HTMLInputElement>('.pcw-watchlist-input')!;
+    expect(rename.value).toBe('Crypto');
+    key(rename, 'Escape');
+    expect(calls.onRenameList).not.toHaveBeenCalled();
+  });
+
+  it('asks again before deleting a list', () => {
+    host.querySelector<HTMLButtonElement>('.pcw-watchlist-name')!.click();
+    const del = host.querySelector<HTMLButtonElement>('[data-action="delete"]')!;
+    del.click();
+    expect(calls.onDeleteList).not.toHaveBeenCalled();
+    expect(del.textContent).toBe('Delete Crypto? Click again');
+    del.click();
+    expect(calls.onDeleteList).toHaveBeenCalledWith('a');
+  });
+
+  it('offers no delete when only one list is left', () => {
+    wl.setLists([lists[0]], 'a');
+    host.querySelector<HTMLButtonElement>('.pcw-watchlist-name')!.click();
+    expect(host.querySelector('[data-action="delete"]')).toBeNull();
+  });
+
+  it('adds and removes symbols', () => {
+    host.querySelector<HTMLButtonElement>('.pcw-watchlist-add')!.click();
+    expect(calls.onAdd).toHaveBeenCalled();
+    const remove = rows()[0].querySelector<HTMLButtonElement>('.pcw-watchlist-remove')!;
+    expect(remove.getAttribute('aria-label')).toBe('Remove BTCUSDT');
+    remove.click();
+    expect(calls.onRemove).toHaveBeenCalledWith('BTCUSDT');
+    expect(calls.onSelect).not.toHaveBeenCalled();
+    key(rows()[2], 'Delete');
+    expect(calls.onRemove).toHaveBeenCalledWith('SOLUSDT');
+  });
+
+  it('marks a row it can remove, so the stylesheet keeps a column for the button beside the numbers', () => {
+    expect(rows().every((r) => r.classList.contains('pcw-watchlist-removable'))).toBe(true);
+  });
+
+  it('moves a row with Alt+arrows and by dragging', () => {
+    key(rows()[0], 'ArrowDown', { altKey: true });
+    expect(calls.onMove).toHaveBeenCalledWith('BTCUSDT', 1);
+    key(rows()[0], 'ArrowUp', { altKey: true });
+    expect(calls.onMove).toHaveBeenCalledTimes(1); // already first
+
+    const drag = new Event('dragstart', { bubbles: true }) as DragEvent;
+    Object.defineProperty(drag, 'dataTransfer', { value: { setData: vi.fn(), effectAllowed: '' } });
+    rows()[2].dispatchEvent(drag);
+    const drop = new Event('drop', { bubbles: true, cancelable: true });
+    rows()[0].dispatchEvent(drop);
+    expect(calls.onMove).toHaveBeenLastCalledWith('SOLUSDT', 0);
+  });
+
+  it('moves focus between rows with the arrow keys', () => {
+    rows()[0].focus();
+    key(rows()[0], 'ArrowDown');
+    expect(document.activeElement).toBe(rows()[1]);
+  });
+
+  it('shows four figures of a price however small, where ten decimals cut it short', () => {
+    wl.setEntry('ETHUSDT', { lastPrice: 0.00000007123456, refPrice: 0.00000007 });
+    expect(rows()[1].querySelector('.pcw-watchlist-price')!.textContent).toBe('0.00000007123');
+    wl.setEntry('ETHUSDT', { lastPrice: 0.000000000456789, refPrice: 0.0000000004 });
+    expect(rows()[1].querySelector('.pcw-watchlist-price')!.textContent).toBe('0.0000000004568');
+  });
+
+  it('writes a price in its symbol’s own decimals when it has them, as the chart does', () => {
+    const other = document.createElement('div');
+    document.body.appendChild(other);
+    const own = new WidgetWatchlist(other, calls, LABELS, {
+      infoOf: (symbol) => (symbol === 'BTCUSDT' ? { symbol, pricePrecision: 0 } : symbol === 'ETHUSDT' ? { symbol, pricePrecision: 2 } : undefined),
+    });
+    own.setLists(lists, 'a');
+    own.setEntry('BTCUSDT', { lastPrice: 49550, refPrice: 49000 });
+    own.setEntry('ETHUSDT', { lastPrice: 256.62, refPrice: 250 });
+    own.setEntry('SOLUSDT', { lastPrice: 256.62, refPrice: 250 });
+    const price = (i: number) => other.querySelectorAll('.pcw-watchlist-row')[i].querySelector('.pcw-watchlist-price')!.textContent;
+    // A stock in dong, an index at two decimals, and one with no decimals of its own (by its size, as before).
+    expect(price(0)).toBe('49,550');
+    expect(price(1)).toBe('256.62');
+    expect(price(2)).toBe('256.6200');
+    own.destroy();
+    other.remove();
+  });
+
+  it('shows prices and moves it is given, and keeps them across list switches', () => {
+    wl.setEntry('ETHUSDT', { lastPrice: 2000, refPrice: 1900 });
+    const eth = () => rows()[1];
+    expect(eth().querySelector('.pcw-watchlist-price')!.textContent).toBe('2,000.00');
+    expect(eth().querySelector('.pcw-watchlist-change')!.textContent).toBe('+5.26%');
+    wl.setLists(lists, 'b');
+    wl.setLists(lists, 'a');
+    expect(eth().querySelector('.pcw-watchlist-price')!.textContent).toBe('2,000.00');
+  });
+
+  it('marks the chart’s symbol', () => {
+    wl.setActive('SOLUSDT');
+    expect(rows()[2].classList.contains('pcw-watchlist-active')).toBe(true);
+    expect(rows()[2].getAttribute('aria-current')).toBe('true');
+  });
+});
+
+describe('WidgetWatchlist keys, after review', () => {
+  it('keeps the keys it handles to itself', () => {
+    const outside = vi.fn();
+    document.addEventListener('keydown', outside);
+    key(rows()[0], 'Delete');
+    key(rows()[0], 'ArrowDown', { altKey: true });
+    document.removeEventListener('keydown', outside);
+    expect(outside).not.toHaveBeenCalled();
+  });
+});
+
+describe('WidgetWatchlist rows, one line of figures', () => {
+  const cell = (row: Element, name: string) => row.querySelector(`.pcw-watchlist-${name}`)?.textContent;
+
+  it('writes no move as neither up nor down: no sign, no colour', () => {
+    wl.setEntry('ETHUSDT', { lastPrice: 2000, refPrice: 2000 });
+    const eth = rows()[1];
+    expect(cell(eth, 'change')).toBe('0.00%');
+    expect(cell(eth, 'move')).toBe('0.00');
+    for (const name of ['move', 'change']) {
+      const el = eth.querySelector(`.pcw-watchlist-${name}`)!;
+      expect(el.classList.contains('pcw-up') || el.classList.contains('pcw-down'), name).toBe(false);
+    }
+    // And takes its colour again when the price moves.
+    wl.setEntry('ETHUSDT', { lastPrice: 1990, refPrice: 2000 });
+    expect(rows()[1].querySelector('.pcw-watchlist-change')!.classList.contains('pcw-down')).toBe(true);
+  });
+
+  it('draws no sparkline unless asked, and gives each row its price, move and change on one line', () => {
+    expect(host.querySelector('canvas')).toBeNull();
+    wl.setEntry('ETHUSDT', { lastPrice: 2000, refPrice: 1900, sparkline: [1900, 1950, 2000] });
+    const eth = rows()[1];
+    expect(cell(eth, 'symbol')).toBe('ETH/USDT');
+    expect(cell(eth, 'price')).toBe('2,000.00');
+    // In the price's own decimals.
+    expect(cell(eth, 'move')).toBe('+100.00');
+    expect(cell(eth, 'change')).toBe('+5.26%');
+    expect(eth.querySelector('.pcw-watchlist-move')!.classList.contains('pcw-up')).toBe(true);
+    wl.setEntry('SOLUSDT', { lastPrice: 90, refPrice: 100 });
+    expect(cell(rows()[2], 'move')).toBe('-10.0000');
+    expect(rows()[2].querySelector('.pcw-watchlist-change')!.classList.contains('pcw-down')).toBe(true);
+  });
+
+  it('gives the list its columns: a last one for the remove button; a sparkline takes the move’s', () => {
+    const columns = (el: Element) => (el.querySelector('.pcw-watchlist-list') as HTMLElement).style.getPropertyValue('--1p-watchlist-columns');
+    expect(columns(host)).toBe('var(--1p-watchlist-gutter) minmax(0, 1fr) auto auto auto var(--1p-watchlist-remove) var(--1p-watchlist-gutter)');
+    // Each cell has its column set: when a narrow panel hides the move, the change and the
+    // remove button keep theirs rather than slide one track left.
+    const placed = [...rows()[0].children].map((c) => [c.className.split(' ')[0], (c as HTMLElement).style.gridColumnStart]);
+    expect(placed).toEqual([['pcw-watchlist-symbol', '2'], ['pcw-watchlist-price', '3'], ['pcw-watchlist-move', '4'], ['pcw-watchlist-change', '5'], ['pcw-watchlist-remove', '6']]);
+    const other = document.createElement('div');
+    const plain = new WidgetWatchlist(other, { onSelect: vi.fn() }, { ...LABELS, columns: { symbol: 'S', price: 'L', move: 'M', change: 'C' } }, { sparkline: true });
+    plain.setLists(lists, 'a');
+    expect(columns(other)).toBe('var(--1p-watchlist-gutter) minmax(0, 1fr) auto auto auto var(--1p-watchlist-gutter)');
+    // A narrow panel holds the name and three figures: with the chart, no move.
+    expect(other.querySelector('.pcw-watchlist-move')).toBeNull();
+    expect([...other.querySelectorAll('.pcw-watchlist-columns > *')].map((h) => h.textContent)).toEqual(['S', '', 'L', 'C']);
+    plain.destroy();
+  });
+
+  it('puts a symbol’s logo before its ticker, and nothing for a symbol without one', () => {
+    const other = document.createElement('div');
+    const logos = new WidgetWatchlist(other, calls, LABELS, {
+      infoOf: (symbol) => (symbol === lists[0].symbols[0] ? { symbol, logo: 'https://example.com/a.svg' } : undefined),
+    });
+    logos.setLists(lists, 'a');
+    const rows = [...other.querySelectorAll<HTMLElement>('.pcw-watchlist-row')];
+    const logo = rows[0].querySelector<HTMLImageElement>('.pcw-watchlist-symbol img.pcw-watchlist-logo');
+    expect(logo?.src).toBe('https://example.com/a.svg');
+    expect(logo?.getAttribute('aria-hidden')).toBe('true');
+    expect(rows[0].querySelector('.pcw-watchlist-symbol')?.textContent).toBe('BTC/USDT');
+    expect(rows.slice(1).every((r) => !r.querySelector('.pcw-watchlist-logo'))).toBe(true);
+    // The tickers line up: with a logo in the list, the rows without one keep its room.
+    expect(other.querySelector('.pcw-watchlist-list, [role="list"]')?.classList.contains('pcw-watchlist-logos')).toBe(true);
+    expect(rows[0].querySelector('.pcw-watchlist-symbol')?.classList.contains('pcw-watchlist-symbol-logo')).toBe(true);
+    // A logo that fails to load keeps its room too, empty.
+    logo!.dispatchEvent(new Event('error'));
+    expect(logo!.parentElement).not.toBeNull();
+    expect(logo!.style.visibility).toBe('hidden');
+    logos.destroy();
+  });
+
+  it('keeps no room for logos in a list that has none', () => {
+    const other = document.createElement('div');
+    const plain = new WidgetWatchlist(other, calls, LABELS, { infoOf: () => undefined });
+    plain.setLists(lists, 'a');
+    expect(other.querySelector('.pcw-watchlist-logos')).toBeNull();
+    plain.destroy();
+  });
+
+  it('draws sparklines when asked', () => {
+    const other = document.createElement('div');
+    const spark = new WidgetWatchlist(other, calls, LABELS, { sparkline: true });
+    spark.setLists(lists, 'a');
+    expect(other.querySelectorAll('canvas.pcw-watchlist-spark')).toHaveLength(3);
+    spark.destroy();
+  });
+
+  it('names a row by its ticker, the venue before it in its tooltip', () => {
+    wl.setLists([{ id: 'v', name: 'Venues', symbols: ['HYPERLIQUID:xyz:NVDA', 'ECB:EURUSD', 'BINANCE:BTCUSDT', 'ODD:', 'DEX:eth:0x88e6:WBTC/WETH', 'DEX:eth:0x11b8:WETH/USDT'] }], 'v');
+    // A symbol ending in ':' has no ticker after it, and shows whole.
+    // A pair already written with its slash (a DEX pool) is not split again: WBTC/W/ETH, WETH//USDT.
+    expect(rows().map((r) => cell(r, 'symbol'))).toEqual(['NVDA', 'EUR/USD', 'BTC/USDT', 'ODD:', 'WBTC/WETH', 'WETH/USDT']);
+    expect(rows()[0].querySelector('.pcw-watchlist-symbol')!.getAttribute('title')).toBe('HYPERLIQUID:xyz:NVDA');
+    // A row keeps its whole symbol: it is what a pick loads.
+    rows()[0].click();
+    expect(calls.onSelect).toHaveBeenCalledWith('HYPERLIQUID:xyz:NVDA');
+  });
+
+  it('heads its columns when given their names, one name over each figure', () => {
+    expect(host.querySelector('.pcw-watchlist-columns')).toBeNull();
+    const other = document.createElement('div');
+    const titled = new WidgetWatchlist(other, calls, { ...LABELS, columns: { symbol: 'Symbol', price: 'Last', move: 'Chg', change: 'Chg%' } });
+    titled.setLists(lists, 'a');
+    const heads = [...other.querySelectorAll('.pcw-watchlist-columns > *')].map((h) => h.textContent);
+    expect(heads).toEqual(['Symbol', 'Last', 'Chg', 'Chg%', '']);
+    // The list and its head share one grid, so the figures line up under their names.
+    expect(other.querySelector('.pcw-watchlist-list')!.contains(other.querySelector('.pcw-watchlist-columns'))).toBe(true);
+    titled.destroy();
+  });
+});

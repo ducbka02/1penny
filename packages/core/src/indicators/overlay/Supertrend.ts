@@ -1,0 +1,76 @@
+import type { IndicatorDescriptor, DataSeries, IndicatorConfig, IndicatorOutput, IndicatorValue } from '@1penny/commons';
+import { IndicatorBase } from '../IndicatorBase.js';
+import { IndicatorValueMap } from '../IndicatorValueMap.js';
+import { getIntParam, getNumberParam } from '../params.js';
+
+export class SupertrendIndicator extends IndicatorBase {
+  descriptor: IndicatorDescriptor = {
+    id: 'supertrend',
+    name: 'Supertrend',
+    placement: 'overlay' as const,
+    defaultConfig: { period: 10, multiplier: 3 },
+    inputs: { period: { kind: 'int', min: 1 }, multiplier: { kind: 'number', min: 0.1, step: 0.1 } },
+    shortName: 'Supertrend',
+    plots: [{ key: 'value', title: 'Supertrend', color: 0, tone: { field: 'trend' }, downColor: 1 }],
+  };
+
+  calculate(data: DataSeries, config: IndicatorConfig): IndicatorOutput {
+    const period = getIntParam(config, 'period', 10, 1);
+    const multiplier = getNumberParam(config, 'multiplier', 3);
+    const values = new IndicatorValueMap();
+    const series: (IndicatorValue | null)[] = new Array(data.length).fill(null);
+    if (data.length < period) return { values, series };
+
+    // ATR
+    const trueRanges: number[] = [data[0].high - data[0].low];
+    for (let i = 1; i < data.length; i++) {
+      trueRanges.push(Math.max(
+        data[i].high - data[i].low,
+        Math.abs(data[i].high - data[i - 1].close),
+        Math.abs(data[i].low - data[i - 1].close),
+      ));
+    }
+
+    let atr = 0;
+    for (let i = 0; i < period; i++) atr += trueRanges[i];
+    atr /= period;
+
+    let upperBand = 0, lowerBand = 0;
+    let prevUpperBand = 0, prevLowerBand = 0;
+    let supertrend = 0;
+    let prevSupertrend = 0;
+    let direction = 1;
+
+    for (let i = period - 1; i < data.length; i++) {
+      if (i > period - 1) {
+        atr = (atr * (period - 1) + trueRanges[i]) / period;
+      }
+
+      const hl2 = (data[i].high + data[i].low) / 2;
+      const basicUpper = hl2 + multiplier * atr;
+      const basicLower = hl2 - multiplier * atr;
+
+      // The first bar has none before it (a period of 1): its own close stands in.
+      const prevClose = data[Math.max(0, i - 1)].close;
+      upperBand = (basicUpper < prevUpperBand || prevClose > prevUpperBand) ? basicUpper : prevUpperBand;
+      lowerBand = (basicLower > prevLowerBand || prevClose < prevLowerBand) ? basicLower : prevLowerBand;
+
+      if (prevSupertrend === prevUpperBand) {
+        supertrend = data[i].close <= upperBand ? upperBand : lowerBand;
+      } else {
+        supertrend = data[i].close >= lowerBand ? lowerBand : upperBand;
+      }
+
+      direction = supertrend === lowerBand ? 1 : -1;
+
+      const val: IndicatorValue = { value: supertrend, trend: direction };
+      values.set(data[i].time, val);
+      series[i] = val;
+
+      prevUpperBand = upperBand;
+      prevLowerBand = lowerBand;
+      prevSupertrend = supertrend;
+    }
+    return { values, series };
+  }
+}

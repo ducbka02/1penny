@@ -1,0 +1,450 @@
+import type {
+  DataAdapter,
+  DataAdapterConfig,
+  DataAdapterEventType,
+  DataAdapterListener,
+  ConnectionState,
+  OHLCBar,
+  Quote,
+  Trade,
+  SymbolInfo,
+  SymbolSearchOptions,
+  TimeFrame,
+} from '@1penny/commons';
+import { rankSymbols, stepDecimals } from '@1penny/commons';
+import { parseAggTrade, parseMiniTicker, parseRestKline, parseRestTicker, parseWsKline } from './binanceTypes.js';
+import { NewestBar } from './newestBar.js';
+
+const TF_MAP: Record<string, string> = {
+  '1s': '1s', '1m': '1m', '3m': '3m', '5m': '5m', '15m': '15m', '30m': '30m',
+  '1h': '1h', '2h': '2h', '4h': '4h', '6h': '6h', '8h': '8h', '12h': '12h',
+  '1d': '1d', '3d': '3d', '1w': '1w', '1M': '1M',
+};
+
+/** Most klines one REST request returns. */
+const MAX_KLINES = 1000;
+/** Most symbols one quote subscription streams (one socket, one URL). */
+const MAX_QUOTE_SYMBOLS = 200;
+
+/** Quote currencies most traded against, first: their pairs rank higher in a search. */
+const QUOTE_RANK = ['USDT', 'USDC', 'FDUSD', 'BTC', 'ETH', 'BNB', 'EUR', 'TRY', 'BRL', 'JPY'];
+
+function quoteBoost(info: SymbolInfo): number {
+  const at = info.currency ? QUOTE_RANK.indexOf(info.currency) : -1;
+  return at < 0 ? 0 : 40 - at * 3;
+}
+
+interface BinanceSymbol {
+  symbol?: unknown;
+  status?: unknown;
+  baseAsset?: unknown;
+  quoteAsset?: unknown;
+  filters?: unknown;
+}
+
+/** A trading symbol from `exchangeInfo`, or null for one that isn't trading. */
+function toSymbolInfo(raw: BinanceSymbol): SymbolInfo | null {
+  if (typeof raw.symbol !== 'string' || raw.status !== 'TRADING') return null;
+  const base = typeof raw.baseAsset === 'string' ? raw.baseAsset : '';
+  const quote = typeof raw.quoteAsset === 'string' ? raw.quoteAsset : '';
+  const priceFilter = Array.isArray(raw.filters)
+    ? raw.filters.find((f): f is { tickSize: string } =>
+      typeof f === 'object' && f !== null && (f as { filterType?: unknown }).filterType === 'PRICE_FILTER'
+      && typeof (f as { tickSize?: unknown }).tickSize === 'string')
+    : undefined;
+  const info: SymbolInfo = {
+    symbol: raw.symbol,
+    description: base && quote ? `${base} / ${quote}` : raw.symbol,
+    exchange: 'Binance',
+    type: 'crypto',
+  };
+  if (priceFilter) {
+    info.pricePrecision = stepDecimals(priceFilter.tickSize);
+    info.minTick = Number(priceFilter.tickSize);
+  }
+  info.timeZone = 'UTC';
+  if (quote) info.currency = quote;
+  return info;
+}
+
+function symbolsOf(body: unknown): SymbolInfo[] {
+  const list = (body as { symbols?: unknown } | null)?.symbols;
+  if (!Array.isArray(list)) return [];
+  const out: SymbolInfo[] = [];
+  for (const raw of list) {
+    const info = toSymbolInfo(raw as BinanceSymbol);
+    if (info) out.push(info);
+  }
+  return out;
+}
+
+/**
+ * Binance public API adapter (no API key required).
+ *
+ * Supports:
+ * - REST klines for historical data
+ * - WebSocket kline stream for real-time data
+ * - Auto-reconnection via the StreamManager
+ *
+ * Usage:
+ *   const adapter = new BinanceAdapter();
+ *   const stream = new StreamManager();
+ *   stream.connect({ adapter, symbol: 'BTCUSDT', timeframe: '1m' });
+ */
+export class BinanceAdapter implements DataAdapter {
+  readonly name = 'binance';
+  /** Binance's kline intervals; other timeframes are built from these. */
+  readonly supportedTimeframes = Object.keys(TF_MAP) as TimeFrame[];
+
+  private ws: WebSocket | null = null;
+  private state: ConnectionState = 'disconnected';
+  private listeners = new Map<DataAdapterEventType, Set<DataAdapterListener>>();
+  private config: DataAdapterConfig | null = null;
+  private restBase: string;
+  private wsBase: string;
+  /** Every trading symbol, loaded on the first search. */
+  private symbolList: Promise<SymbolInfo[]> | null = null;
+  /** Which kline frames make a tick: those of the newest bar the connection has sent, or its history ends on. */
+  private readonly newestBar = new NewestBar();
+
+  constructor(options?: { restBase?: string; wsBase?: string }) {
+    this.restBase = options?.restBase ?? 'https://api.binance.com/api/v3';
+    this.wsBase = options?.wsBase ?? 'wss://stream.binance.com:9443/ws';
+  }
+
+  // --- DataAdapter interface ---
+
+  connect(config: DataAdapterConfig): void {
+    this.config = config;
+    this.newestBar.reset(config.symbol, config.timeframe);
+    this.connectWs();
+  }
+
+  disconnect(): void {
+    if (this.ws) {
+      // Detach every handler, not just onclose: closing a socket that is
+      // still CONNECTING fires `error`, and the adapter is typically reused by
+      // the next connection (symbol/timeframe switch) — a stale error or
+      // message would land on that connection's listeners.
+      const ws = this.ws;
+      ws.onopen = null;
+      ws.onmessage = null;
+      ws.onerror = null;
+      ws.onclose = null;
+      ws.close();
+      this.ws = null;
+    }
+    this.setState('disconnected');
+  }
+
+  getConnectionState(): ConnectionState {
+    return this.state;
+  }
+
+  async fetchHistory(symbol: string, timeframe: TimeFrame, limit = 500): Promise<OHLCBar[]> {
+    const bars = await this.fetchKlines(symbol, timeframe, limit, '');
+    // A connection to them starts from its last bar.
+    this.newestBar.serve(symbol, timeframe, bars);
+    return bars;
+  }
+
+  /** Trading symbols matching `query`, best first; the list loads once, on the first search. */
+  async searchSymbols(query: string, options?: SymbolSearchOptions): Promise<SymbolInfo[]> {
+    const list = await this.loadSymbols();
+    return rankSymbols(list, query, options?.limit ?? 50, quoteBoost);
+  }
+
+  /** Name, price step and currency of one symbol, or null for one Binance doesn't trade. */
+  async resolveSymbol(symbol: string): Promise<SymbolInfo | null> {
+    if (this.symbolList) {
+      const list = await this.symbolList.catch(() => null);
+      const known = list?.find((s) => s.symbol === symbol);
+      if (known) return known;
+    }
+    const res = await fetch(`${this.restBase}/exchangeInfo?symbol=${encodeURIComponent(symbol)}`);
+    if (!res.ok) return null;
+    return symbolsOf(await res.json())[0] ?? null;
+  }
+
+  private loadSymbols(): Promise<SymbolInfo[]> {
+    if (!this.symbolList) {
+      this.symbolList = (async () => {
+        const res = await fetch(`${this.restBase}/exchangeInfo`);
+        if (!res.ok) throw new Error(`Binance REST error: ${res.status}`);
+        return symbolsOf(await res.json());
+      })();
+      // A failed load is tried again on the next search.
+      this.symbolList.catch(() => { this.symbolList = null; });
+    }
+    return this.symbolList;
+  }
+
+  /**
+   * Live quotes for up to 200 symbols: last price and the 24 h change, high,
+   * low and volume. A snapshot first, then the exchange's mini-ticker stream
+   * (reconnected while subscribed). Symbols that can't be Binance tickers are
+   * left out.
+   */
+  subscribeQuotes(symbols: readonly string[], onQuotes: (quotes: Quote[]) => void): () => void {
+    const wanted = [...new Set(symbols.map((s) => s.trim().toUpperCase()))]
+      .filter((s) => /^[A-Z0-9]{2,30}$/.test(s))
+      .slice(0, MAX_QUOTE_SYMBOLS);
+    if (wanted.length === 0) return () => {};
+
+    let stopped = false;
+    let ws: WebSocket | null = null;
+    let retry: ReturnType<typeof setTimeout> | null = null;
+    let attempts = 0;
+    /** Symbols the stream has quoted: an older snapshot never overwrites them. */
+    const streamed = new Set<string>();
+    const controller = new AbortController();
+
+    const snapshot = async (): Promise<unknown> => {
+      const res = await fetch(`${this.restBase}/ticker/24hr?symbols=${encodeURIComponent(JSON.stringify(wanted))}`, { signal: controller.signal });
+      if (res.ok) return res.json();
+      // One symbol the exchange doesn't know refuses the whole list: take every ticker, keep ours.
+      const all = await fetch(`${this.restBase}/ticker/24hr`, { signal: controller.signal });
+      if (!all.ok) return [];
+      const rows: unknown = await all.json();
+      const keep = new Set(wanted);
+      return Array.isArray(rows) ? rows.filter((r) => keep.has((r as { symbol?: unknown })?.symbol as string)) : [];
+    };
+    snapshot()
+      .then((rows: unknown) => {
+        if (stopped || !Array.isArray(rows)) return;
+        const quotes = rows.map(parseRestTicker).filter((q): q is Quote => q !== null && !streamed.has(q.symbol));
+        if (quotes.length > 0) onQuotes(quotes);
+      })
+      .catch(() => { /* the stream still comes */ });
+
+    const streamBase = this.wsBase.replace(/\/ws\/?$/, '');
+    const open = (): void => {
+      if (stopped) return;
+      try {
+        ws = new WebSocket(`${streamBase}/stream?streams=${wanted.map((s) => `${s.toLowerCase()}@miniTicker`).join('/')}`);
+      } catch {
+        reconnect();
+        return;
+      }
+      ws.onopen = () => { attempts = 0; };
+      ws.onmessage = (event) => {
+        let frame: unknown;
+        try {
+          frame = JSON.parse(typeof event.data === 'string' ? event.data : '');
+        } catch {
+          return;
+        }
+        const quote = parseMiniTicker(frame);
+        if (!quote || stopped) return;
+        streamed.add(quote.symbol);
+        onQuotes([quote]);
+      };
+      ws.onclose = () => {
+        ws = null;
+        reconnect();
+      };
+    };
+    const reconnect = (): void => {
+      if (stopped) return;
+      retry = setTimeout(open, Math.min(30_000, 1000 * 2 ** attempts++));
+    };
+    open();
+
+    return () => {
+      stopped = true;
+      controller.abort();
+      if (retry) clearTimeout(retry);
+      if (ws) {
+        ws.onopen = null;
+        ws.onmessage = null;
+        ws.onclose = null;
+        ws.close();
+        ws = null;
+      }
+    };
+  }
+
+  /** Up to 1000 recent trades, oldest first (aggregate trades: one per taker order and price). */
+  async fetchTrades(symbol: string, limit = 1000): Promise<Trade[]> {
+    const capped = Math.max(1, Math.min(1000, Math.floor(limit)));
+    const res = await fetch(`${this.restBase}/aggTrades?symbol=${encodeURIComponent(symbol.toUpperCase())}&limit=${capped}`);
+    if (!res.ok) throw new Error(`Binance aggTrades ${res.status}`);
+    const rows: unknown = await res.json();
+    return Array.isArray(rows) ? rows.map(parseAggTrade).filter((t): t is Trade => t !== null) : [];
+  }
+
+  /** Live trades of `symbol` (the aggregate trade stream), reconnected while subscribed. */
+  subscribeTrades(symbol: string, onTrades: (trades: Trade[]) => void): () => void {
+    const stream = `${symbol.trim().toLowerCase()}@aggTrade`;
+    if (!/^[a-z0-9]{2,30}@aggTrade$/.test(stream)) return () => {};
+    let stopped = false;
+    let ws: WebSocket | null = null;
+    let retry: ReturnType<typeof setTimeout> | null = null;
+    let attempts = 0;
+    const open = (): void => {
+      if (stopped) return;
+      try {
+        ws = new WebSocket(`${this.wsBase}/${stream}`);
+      } catch {
+        reconnect();
+        return;
+      }
+      ws.onopen = () => { attempts = 0; };
+      ws.onmessage = (event) => {
+        let frame: unknown;
+        try {
+          frame = JSON.parse(typeof event.data === 'string' ? event.data : '');
+        } catch {
+          return;
+        }
+        const trade = parseAggTrade(frame);
+        if (trade && !stopped) onTrades([trade]);
+      };
+      ws.onclose = () => {
+        ws = null;
+        reconnect();
+      };
+    };
+    const reconnect = (): void => {
+      if (stopped) return;
+      retry = setTimeout(open, Math.min(30_000, 1000 * 2 ** attempts++));
+    };
+    open();
+    return () => {
+      stopped = true;
+      if (retry) clearTimeout(retry);
+      if (ws) {
+        ws.onopen = null;
+        ws.onmessage = null;
+        ws.onclose = null;
+        ws.close();
+        ws = null;
+      }
+    };
+  }
+
+  /** Up to `limit` klines (1000 at most) that open before `before` (ms). */
+  fetchHistoryBefore(symbol: string, timeframe: TimeFrame, before: number, limit = 500): Promise<OHLCBar[]> {
+    return this.fetchKlines(symbol, timeframe, Math.min(limit, MAX_KLINES), `&endTime=${Math.floor(before) - 1}`);
+  }
+
+  private async fetchKlines(symbol: string, timeframe: TimeFrame, limit: number, range: string): Promise<OHLCBar[]> {
+    const interval = TF_MAP[timeframe] ?? '15m';
+    const url = `${this.restBase}/klines?symbol=${symbol}&interval=${interval}&limit=${limit}${range}`;
+    const res = await fetch(url);
+
+    if (!res.ok) throw new Error(`Binance REST error: ${res.status}`);
+
+    const data: unknown = await res.json();
+    if (!Array.isArray(data)) return [];
+    const bars: OHLCBar[] = [];
+    for (const raw of data) {
+      const parsed = parseRestKline(raw);
+      if (parsed) bars.push(parsed);
+    }
+    return bars;
+  }
+
+  on<T = unknown>(event: DataAdapterEventType, listener: DataAdapterListener<T>): void {
+    let set = this.listeners.get(event);
+    if (!set) {
+      set = new Set();
+      this.listeners.set(event, set);
+    }
+    set.add(listener as DataAdapterListener);
+  }
+
+  off<T = unknown>(event: DataAdapterEventType, listener: DataAdapterListener<T>): void {
+    this.listeners.get(event)?.delete(listener as DataAdapterListener);
+  }
+
+  dispose(): void {
+    this.disconnect();
+    this.listeners.clear();
+  }
+
+  // --- Internal ---
+
+  private connectWs(): void {
+    if (!this.config) return;
+
+    const symbol = this.config.symbol.toLowerCase();
+    const interval = TF_MAP[this.config.timeframe] ?? '15m';
+    const stream = `${symbol}@kline_${interval}`;
+    const url = `${this.wsBase}/${stream}`;
+
+    this.setState('connecting');
+
+    try {
+      this.ws = new WebSocket(url);
+    } catch {
+      this.setState('error');
+      this.emitEvent('error', { message: 'WebSocket creation failed' });
+      this.emitEvent('connectionChange', 'error');
+      return;
+    }
+
+    this.ws.onopen = () => {
+      this.setState('connected');
+      this.emitEvent('connectionChange', 'connected');
+    };
+
+    this.ws.onmessage = (event) => {
+      let msg: unknown;
+      try {
+        msg = JSON.parse(typeof event.data === 'string' ? event.data : '');
+      } catch {
+        return;
+      }
+      if (
+        typeof msg === 'object' &&
+        msg !== null &&
+        (msg as { e?: unknown }).e === 'kline'
+      ) {
+        this.handleKline((msg as { k?: unknown }).k);
+      }
+    };
+
+    this.ws.onerror = () => {
+      this.setState('error');
+      this.emitEvent('error', { message: 'WebSocket error' });
+    };
+
+    this.ws.onclose = () => {
+      this.setState('disconnected');
+      this.emitEvent('connectionChange', 'disconnected');
+    };
+  }
+
+  private handleKline(k: unknown): void {
+    const parsed = parseWsKline(k);
+    if (!parsed) return;
+    const { bar, closed } = parsed;
+
+    // A frame of a bar already past (a late final, a stale frame, the
+    // history's last sent again closed as served) still goes out as a bar,
+    // but its close is no live price.
+    const live = this.newestBar.admit(bar, closed);
+    this.emitEvent('bar', { bar, closed });
+    if (!live) return;
+    this.emitEvent('tick', {
+      time: Date.now(),
+      price: bar.close,
+      volume: bar.volume,
+    });
+  }
+
+  private setState(state: ConnectionState): void {
+    this.state = state;
+  }
+
+  private emitEvent(type: DataAdapterEventType, data: unknown): void {
+    const set = this.listeners.get(type);
+    if (set) {
+      const event = { type, data, timestamp: Date.now() };
+      for (const listener of set) {
+        listener(event);
+      }
+    }
+  }
+}
